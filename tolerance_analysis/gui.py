@@ -27,9 +27,25 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from toltool import pipeline
 
 
-DEFAULT_ZMX = r"F:\个人文件\P3111\05304_tol.zmx"
-DEFAULT_CONFIG = r"F:\个人文件\P3111\tol_config_05304.xlsx"
-DEFAULT_OUTDIR = r"F:\个人文件\P3111"
+def _app_dir() -> str:
+    """打包后返回 exe 所在目录，否则返回脚本所在目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return _HERE
+
+
+def _default_config() -> str:
+    """优先用 exe/脚本同级的模板配置作为默认，不存在则留空。"""
+    for name in ("tol_config.xlsx", "tol_config_模板.xlsx"):
+        p = os.path.join(_app_dir(), name)
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+DEFAULT_ZMX = ""
+DEFAULT_CONFIG = _default_config()
+DEFAULT_OUTDIR = _app_dir()
 
 
 def _apply_dark_titlebar(widget: QtWidgets.QWidget) -> None:
