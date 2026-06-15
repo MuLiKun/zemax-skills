@@ -15,6 +15,10 @@
 - CriterionScripts 列表项是文件名(如 '05304_tol.TSC')，CriterionScript 取其索引。
 - 完成判据：IsRunning 变 False 且 Succeeded == True。
 - Progress 在 TSC 模式可能直到结束才到 100。
+- ZTD 正确写法★：运行前 SaveTolDataFile=True + TolDataFile=纯文件名
+  (os.path.basename，不能带路径)；Zemax 写到当前镜头文件 _tol.zmx 同目录。
+  绝不在运行后调 tol.Save(ztd)，那会写出损坏 ZTD。运行后只按 lens_dir
+  回读实际生成的 ZTD 路径。
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ class RunSpec:
     ztd_path: str = ""
     save_best_worst: bool = True
     file_prefix: str = ""
+    lens_dir: str = ""
 
 
 @dataclass
@@ -135,7 +140,7 @@ def configure(tol, spec: RunSpec):
 
     if spec.ztd_path:
         tol.SaveTolDataFile = True
-        tol.TolDataFile = spec.ztd_path
+        tol.TolDataFile = os.path.basename(spec.ztd_path)
 
     return si, warnings
 
@@ -208,10 +213,23 @@ def run(zos_system, spec: RunSpec, progress_cb=None, cancel_flag=None,
             bw_folder = str(tol.BestWorstOutputFolder or "")
         except Exception:
             pass
+
+        actual_ztd = spec.ztd_path
+        if spec.ztd_path:
+            ztd_name = os.path.basename(spec.ztd_path)
+            candidates = []
+            if spec.lens_dir:
+                candidates.append(os.path.join(spec.lens_dir, ztd_name))
+            candidates.append(spec.ztd_path)
+            for c in candidates:
+                if c and os.path.isfile(c):
+                    actual_ztd = c
+                    break
+
         emit(100, "完成" if ok else "失败")
         return RunResult(
             succeeded=ok,
-            ztd_path=spec.ztd_path,
+            ztd_path=actual_ztd,
             num_runs=spec.num_runs,
             message="" if ok else (str(tol.ErrorMessage) or "运行未成功"),
             bestworst_folder=bw_folder,

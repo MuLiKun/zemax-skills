@@ -252,8 +252,13 @@ def apply_detail_to_tde(zos_system, detail_rows: list[dict]) -> int:
 def build_and_write(zos_system, wizard_rows: list[dict],
                     detail_rows: list[dict], center_wave: int = 0,
                     test_wavelength_um: float = 0.0,
-                    focus_compensation: bool = False) -> int:
-    """完整流程：原生向导生成 → 明细覆盖 → 返回 TDE 总行数。
+                    focus_compensation: bool = False,
+                    comp_surface: int = 0,
+                    comp_min=None, comp_max=None) -> int:
+    """完整流程：原生向导生成 → 明细覆盖 → COMP 补偿器 → 返回 TDE 总行数。
+
+    顺序铁律：向导 → 明细 → COMP 最后追加（否则被向导清掉）。
+    comp_surface>0 才追加 COMP；留空=0=跳过（非 bug，需在 Excel 填面号）。
 
     center_wave 保留兼容旧签名（原生向导用 TestWavelength 设波长，
     若只给了 center_wave 而无 test_wavelength_um，则忽略 center_wave，
@@ -264,4 +269,32 @@ def build_and_write(zos_system, wizard_rows: list[dict],
                       focus_compensation=focus_compensation)
     if detail_rows:
         apply_detail_to_tde(zos_system, detail_rows)
+    if comp_surface and int(comp_surface) > 0:
+        add_back_focus_compensator(zos_system, int(comp_surface),
+                                   comp_min, comp_max)
     return zos_system.TDE.NumberOfOperands
+
+
+def add_back_focus_compensator(zos_system, comp_surface: int,
+                               vmin=None, vmax=None,
+                               comment: str = "后焦补偿") -> int:
+    """在 TDE 末尾追加一个 COMP 补偿器（后焦：该面厚度作补偿器）。
+
+    官方语义：COMP 的 Param1=面号，Param2=0 表示对该面厚度做补偿。
+    必须在向导与明细之后追加，否则会被向导清掉。
+    vmin/vmax 为 None 时留 0（由 Zemax 自由调整）。返回新行号。
+    """
+    import ZOSAPI
+    T = ZOSAPI.Editors.TDE.ToleranceOperandType
+
+    tde = zos_system.TDE
+    r = tde.AddOperand()
+    if not r.ChangeType(T.COMP):
+        raise RuntimeError("COMP ChangeType 失败")
+    r.Param1 = int(comp_surface)
+    r.Param2 = 0
+    r.Min = 0.0 if vmin is None else float(vmin)
+    r.Max = 0.0 if vmax is None else float(vmax)
+    if comment:
+        r.Comment = comment
+    return tde.NumberOfOperands

@@ -96,3 +96,44 @@ def build_and_save(zos_system, mfe_rows: list[dict], base_name: str) -> tuple[in
     path = default_mf_path(zos_system, base_name)
     save_mf(zos_system, path)
     return n, path
+
+
+def build_comp_mf(zos_system, base_name: str, freq_lp: float = 34.0,
+                  sampling: int = 3, wave: int = 2) -> tuple[int, str]:
+    """构建后焦补偿专用评价函数并保存 .MF（不沿用报告 MF）。
+
+    内容：单条 GMTA（几何 MTF 平均），视场=1（中心视场），
+    目标=1，权重=1，空间频率=freq_lp（补偿线对，默认 34 lp/mm）。
+    GMTA 参数语义：P1采样 P2波长 P3视场号 P4空间频率。
+    base_name 自动加后缀 _comp。返回 (行数, .MF 路径)。
+    """
+    import ZOSAPI
+
+    mfe = zos_system.MFE
+    MOT = ZOSAPI.Editors.MFE.MeritOperandType
+    MC = ZOSAPI.Editors.MFE.MeritColumn
+
+    while mfe.NumberOfOperands > 1:
+        mfe.RemoveOperandAt(mfe.NumberOfOperands)
+    first = mfe.GetOperandAt(1)
+    first.ChangeType(MOT.BLNK)
+
+    r = mfe.AddOperand()
+    if not r.ChangeType(MOT.GMTA):
+        raise RuntimeError("MFE ChangeType 失败: GMTA")
+    params = {"Param1": sampling, "Param2": wave, "Param3": 1, "Param4": freq_lp}
+    for nm, val in params.items():
+        sval = _to_cell_str(val)
+        if sval is None:
+            continue
+        r.GetOperandCell(getattr(MC, nm)).Value = sval
+    r.Target = 1.0
+    r.Weight = 1.0
+
+    comp_base = base_name
+    if comp_base.lower().endswith(".mf"):
+        comp_base = comp_base[:-3]
+    comp_base += "_comp"
+    path = default_mf_path(zos_system, comp_base)
+    save_mf(zos_system, path)
+    return 1, path

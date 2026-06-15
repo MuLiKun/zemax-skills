@@ -21,11 +21,12 @@ description: "Runs Zemax tolerance analysis, merit-function operands, solves, an
 
 ## 本项目已封装的实现（优先参考）
 
-本工作区已把下述实测经验固化为可复用 Python 程序（包 `toltool/`，入口 `main.py` / `tol_run.py` / 方案A/B）。改公差分析逻辑时优先看这些文件，而非从零写：
+本工作区已把下述实测经验固化为可复用 Python 程序（包 `toltool/`，入口 `gui.py` / `main.py` / `tol_run.py` / 方案A/B）。改公差分析逻辑时优先看这些文件，而非从零写：
 
 - `toltool/pipeline.py`：单一来源 `prepare_session()`（连接→TDE→MFE→TSC→Save）+ `run_montecarlo()`。
 - `toltool/tol_runner.py`：配置并运行脚本式蒙卡（界面解耦，progress_cb/cancel_flag）。
 - `toltool/ztd_reader.py`：读 ZTD MonteCarloData 出分项统计。
+- `gui.py`：PySide6 暗色界面，QThread 后台跑蒙卡 + 信号回调日志/计时，业务全复用 pipeline；不重复任何公差逻辑。
 - 使用说明见 `公差分析程序_使用说明.md`，需求见 `公差分析程序_需求文档.md`。
 
 ## 连接
@@ -60,9 +61,10 @@ Criterion 是单一标量，一次只输出一个判据分布。要把点列/GEN
 
 ### 完成判据与长运行
 
-- 完成：`IsRunning` 变 False 且 `Succeeded==True`。`Progress` 在 TSC 模式可能直到结束才到 100。
+- 完成：`IsRunning` 变 False 且 `Succeeded==True`。
 - 扩展模式轮询不要快于约 2 秒，否则 IPC 管道易断。
-- **写 TSC 的权限坑**：用后台隐藏进程（`Start-Process -WindowStyle Hidden`）启动的 python 写不了 `Documents\Zemax\Tolerance`（errno13）；**前台终端进程正常**。这不是代码问题，是进程启动方式差异。
+- **写 TSC 的权限坑**：后台隐藏进程（`Start-Process -WindowStyle Hidden`）启动的 python 写不了 `Documents\Zemax\Tolerance`（errno13）；前台终端进程正常。非代码问题，是进程启动方式差异。
+- **TSC 模式无逐次进度（实测定论，勿再尝试做 1/N 进度）**：运行期间 `Progress` 全程 0、结束才跳 100，无任何标量属性随运行变化；MC 样本文件**跑完才一次性写**，且只写 `NumberToSave` 个（非 `NumberOfRuns` 个）。TSC 的 `SAVE` 命令只能存固定一个文件、不支持变量，**无法逐圈保存**。要保留全部样本只能把 `NumberToSave=NumberOfRuns`，但仍是跑完才写。GUI 只能诚实显示「总数 + 已用时间」，做不到逐次进度。
 
 ### 读取结果：ToleranceDataViewer
 

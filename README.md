@@ -7,6 +7,7 @@
 ```
 agentstudy/
 ├── tolerance_analysis/        公差分析自动化程序（主项目）
+│   ├── gui.py                 图形界面入口（PySide6，暗色主题，推荐）
 │   ├── main.py / tol_run.py   命令行入口
 │   ├── toltool/               核心代码包（连接/建表/运行/读结果）
 │   ├── 方案A_全自动 / 方案B_手动观察
@@ -29,6 +30,14 @@ agentstudy/
 
 详见 [tolerance_analysis/公差分析程序_使用说明.md](tolerance_analysis/公差分析程序_使用说明.md)。
 
+图形界面（推荐，暗色主题，实时日志 + 运行计时）：
+
+```powershell
+.\.venv\Scripts\python.exe -u tolerance_analysis\gui.py
+```
+
+命令行：
+
 ```powershell
 cd tolerance_analysis
 ..\.venv\Scripts\python.exe -u main.py
@@ -39,4 +48,4 @@ cd tolerance_analysis
 ## 环境
 
 - Zemax OpticStudio 2023 R1（ZOS-API / .NET）
-- Python + pythonnet、openpyxl、numpy
+- Python + pythonnet、openpyxl、numpy、PySide6（GUI）
