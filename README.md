@@ -49,3 +49,12 @@ cd tolerance_analysis
 
 - Zemax OpticStudio 2023 R1（ZOS-API / .NET）
 - Python + pythonnet、openpyxl、numpy、PySide6（GUI）
+
+## 变更履历
+
+> 仅记录功能层面的主要变更，便于追溯。日期格式 YYYY-MM-DD。
+
+- **2026-06-21** GUI 移植性增强：Zemax 安装目录改为分层智能查找（显式 → INI 配置 → 环境变量 `ZEMAX_ZOS_DIR` → 注册表+多盘 glob 搜索）；自动找不到时弹窗引导手动选目录并写入 `zemax_config.ini` 永久记住，换电脑免改代码。
+- **2026-06-21** 新增 PyInstaller 打包（`gui.spec`，onedir 无黑窗），可生成独立 `公差分析.exe`，Excel 模板与配置模板随 exe 外置。
+- **2026-06-21** 新增 PySide6 图形界面 `gui.py`（暗色主题、实时日志、运行计时、Standalone/交互扩展连接模式切换、强制停止）。
+- **初始版本** 公差分析自动化核心：ZOS-API 连接、按 Excel 重建 TDE/MFE/TSC、脚本式蒙特卡洛、ZTD 分项统计；提供命令行入口（`main.py`/`tol_run.py`）与方案 A/B。

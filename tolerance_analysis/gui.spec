@@ -14,9 +14,12 @@ import os
 block_cipher = None
 
 _TEMPLATE = "tol_config_模板.xlsx"
+_INI_EXAMPLE = "zemax_config.ini.example"
 datas = []
 if os.path.isfile(_TEMPLATE):
     datas.append((_TEMPLATE, "."))
+if os.path.isfile(_INI_EXAMPLE):
+    datas.append((_INI_EXAMPLE, "."))
 
 hiddenimports = [
     "clr",
@@ -84,3 +87,9 @@ if os.path.isfile(_TEMPLATE):
     _dst = os.path.join("dist", "公差分析", _TEMPLATE)
     if os.path.isdir(os.path.dirname(_dst)):
         shutil.copyfile(_TEMPLATE, _dst)
+
+if os.path.isfile(_INI_EXAMPLE):
+    import shutil
+    _dst = os.path.join("dist", "公差分析", _INI_EXAMPLE)
+    if os.path.isdir(os.path.dirname(_dst)):
+        shutil.copyfile(_INI_EXAMPLE, _dst)

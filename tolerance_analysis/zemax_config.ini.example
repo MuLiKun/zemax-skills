@@ -1,0 +1,6 @@
+[zemax]
+# Zemax OpticStudio 安装目录（含 ZOSAPI_NetHelper.dll）
+# 首次自动查找失败并由弹窗选定后自动写入；也可手动填写
+# 复制本文件为 zemax_config.ini 并填入实际路径即可，例如：
+#   zos_dir = C:\Program Files\Ansys Zemax OpticStudio 2023 R1.00
+zos_dir =

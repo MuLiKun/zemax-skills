@@ -25,6 +25,7 @@ if _HERE not in sys.path:
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from toltool import pipeline
+from toltool import zos_connect
 
 
 def _app_dir() -> str:
@@ -144,13 +145,16 @@ class _Worker(QtCore.QObject):
     log = QtCore.Signal(str)
     finished = QtCore.Signal(bool, str)
     started = QtCore.Signal(int, int)
+    need_zos_dir = QtCore.Signal(list)
 
-    def __init__(self, zmx: str, config: str, outdir: str, connect: str):
+    def __init__(self, zmx: str, config: str, outdir: str, connect: str,
+                 zos_dir: str | None = None):
         super().__init__()
         self._zmx = zmx
         self._config = config
         self._outdir = outdir
         self._connect = connect
+        self._zos_dir = zos_dir
         self._cancel = False
         self._force = False
         self._sess = None
@@ -175,7 +179,8 @@ class _Worker(QtCore.QObject):
         try:
             prep = pipeline.prepare_session(
                 self._zmx, self._config, outdir=self._outdir,
-                connect=self._connect, log=self.log.emit)
+                connect=self._connect, log=self.log.emit,
+                zos_dir=self._zos_dir)
             sess = prep.sess
             self._sess = sess
 
@@ -202,6 +207,8 @@ class _Worker(QtCore.QObject):
             if result.bestworst_folder:
                 self.log.emit(f"Worst/Best 输出目录: {result.bestworst_folder}")
             self.finished.emit(True, result.ztd_path)
+        except zos_connect.ZosDirNotFound as e:
+            self.need_zos_dir.emit(list(e.searched))
         except Exception as e:
             if self._force:
                 self.finished.emit(False, "已强制停止（后台 Zemax 已关闭）")
@@ -226,6 +233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(720, 560)
         self._thread = None
         self._worker = None
+        self._run_args = None
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -354,6 +362,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._append_log(f"配置 Excel: {config}")
         self._append_log(f"输出目录: {outdir}")
 
+        self._run_args = (zmx, config, outdir, connect)
+        self._start_worker(None)
+
+    def _start_worker(self, zos_dir):
+        if not self._run_args:
+            self._warn("尚未设置运行参数，请先点击「开始分析」。")
+            return
+        zmx, config, outdir, connect = self._run_args
         self._set_running(True)
         self._num_runs = 0
         self._num_to_save = 0
@@ -362,12 +378,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_runinfo.setText("")
         self._timer.start()
         self._thread = QtCore.QThread(self)
-        self._worker = _Worker(zmx, config, outdir, connect)
+        self._worker = _Worker(zmx, config, outdir, connect, zos_dir=zos_dir)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.log.connect(self._append_log)
         self._worker.started.connect(self._on_started)
         self._worker.finished.connect(self._on_finished)
+        self._worker.need_zos_dir.connect(self._on_need_zos_dir)
         self._thread.start()
 
     def _on_tick(self):
@@ -417,6 +434,55 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("失败")
             self.lbl_runinfo.setText("已停止")
             self._warn("公差分析失败：\n" + info)
+
+    @QtCore.Slot(list)
+    def _on_need_zos_dir(self, searched: list):
+        self._timer.stop()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait()
+            self._thread = None
+        self._worker = None
+        self._set_running(False)
+        self._append_log("⚠ 未自动找到 Zemax 安装目录，请手动指定。")
+
+        tip = "未能自动找到 Zemax（ZOS-API）安装目录。"
+        if searched:
+            tip += "\n\n已搜索以下位置：\n" + "\n".join(
+                "  - " + str(p) for p in searched[:20])
+        tip += "\n\n请选择 Zemax OpticStudio 安装目录（含 ZOSAPI_NetHelper.dll）。"
+
+        max_attempts = 5
+        for _ in range(max_attempts):
+            ret = _dark_message_box(
+                self, QtWidgets.QMessageBox.Warning, "未找到 Zemax", tip,
+                QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Ok)
+            if ret != QtWidgets.QMessageBox.Ok:
+                self._append_log("已取消指定 Zemax 目录。")
+                self.statusBar().showMessage("已取消")
+                return
+            d = QtWidgets.QFileDialog.getExistingDirectory(
+                self, "选择 Zemax OpticStudio 安装目录")
+            if not d:
+                continue
+            if not zos_connect.is_valid_zos_dir(d):
+                self._warn(
+                    "该目录下未找到完整的 ZOS-API DLL，请重新选择。\n"
+                    "（需含 ZOSAPI_NetHelper.dll / ZOSAPI_Interfaces.dll / ZOSAPI.dll）\n\n"
+                    f"你选的是：\n{d}")
+                continue
+            try:
+                path = zos_connect.save_zos_dir_to_config(d)
+                self._append_log(f"已记住 Zemax 目录并写入：{path}")
+            except Exception as e:
+                self._append_log(f"写入配置失败（不影响本次运行）：{e}")
+            self._append_log(f"使用 Zemax 目录重新连接：{d}")
+            self._start_worker(d)
+            return
+
+        self._append_log(f"已连续 {max_attempts} 次未选定有效目录，已停止。")
+        self.statusBar().showMessage("已取消")
 
     def _set_running(self, running: bool):
         self.btn_run.setEnabled(not running)

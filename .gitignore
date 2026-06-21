@@ -22,6 +22,9 @@ output/
 *.MF
 *_tol.zmx
 
+# ---- 本机 Zemax 路径配置（含本机绝对路径，不入库；模板 .example 入库）----
+zemax_config.ini
+
 # ---- Excel 临时锁文件 ----
 ~$*.xlsx
 

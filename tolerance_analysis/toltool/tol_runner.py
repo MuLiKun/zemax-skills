@@ -1,4 +1,4 @@
-"""tol_runner.py —— 配置并运行脚本式蒙特卡洛公差分析（界面解耦）。
+r"""tol_runner.py —— 配置并运行脚本式蒙特卡洛公差分析（界面解耦）。
 
 职责（需求文档 §4.7/§7、skill §2b/§2c/§2d）：
 - 配置 OpenTolerancing：SetupModeIndex=0 + CriterionIndex=15(自定义脚本)
@@ -15,10 +15,13 @@
 - CriterionScripts 列表项是文件名(如 '05304_tol.TSC')，CriterionScript 取其索引。
 - 完成判据：IsRunning 变 False 且 Succeeded == True。
 - Progress 在 TSC 模式可能直到结束才到 100。
-- ZTD 正确写法★：运行前 SaveTolDataFile=True + TolDataFile=纯文件名
-  (os.path.basename，不能带路径)；Zemax 写到当前镜头文件 _tol.zmx 同目录。
-  绝不在运行后调 tol.Save(ztd)，那会写出损坏 ZTD。运行后只按 lens_dir
-  回读实际生成的 ZTD 路径。
+- ZTD 正确写法★：运行前 SaveTolDataFile=True + TolDataFile=绝对路径
+  (os.path.abspath)。早期曾用纯文件名(os.path.basename)依赖 Zemax 相对
+  目录解析，实测在 standalone + 跨盘(镜头在 F 盘)场景下失效：Zemax 自报
+  Succeeded=True 却不落盘到任何标准目录，造成"假成功"。改绝对路径后稳定。
+  绝不在运行后调 tol.Save(ztd)，那会写出损坏 ZTD。运行后按多候选路径
+  (绝对路径/lens_dir/Documents\Zemax\Tolerance)回读实际生成的 ZTD；
+  要求保存 ZTD 却回读不到时判为失败，不再"假成功"。
 """
 
 from __future__ import annotations
@@ -90,6 +93,24 @@ def _find_index(tol, count_attr, getter_attr, target, aliases=None):
     return -1
 
 
+def _win_long_path(path: str) -> str:
+    r"""Windows 下对超过 MAX_PATH(260) 的本地绝对路径加 \\?\ 扩展前缀。
+
+    扩展前缀要求纯反斜杠且为绝对路径，故先规范化分隔符。已带前缀或
+    非 Windows 平台原样返回。
+    """
+    if os.name != "nt" or not path:
+        return path
+    if path.startswith("\\\\?\\"):
+        return path
+    if len(path) < 260:
+        return path
+    norm = os.path.normpath(path)
+    if norm.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + norm[2:]
+    return "\\\\?\\" + norm
+
+
 def _find_script_index(tol, tsc_name) -> int:
     """按 TSC 文件名(忽略大小写/扩展名)定位 CriterionScript 索引。"""
     base = os.path.basename(str(tsc_name)).lower()
@@ -140,7 +161,7 @@ def configure(tol, spec: RunSpec):
 
     if spec.ztd_path:
         tol.SaveTolDataFile = True
-        tol.TolDataFile = os.path.basename(spec.ztd_path)
+        tol.TolDataFile = _win_long_path(os.path.abspath(spec.ztd_path))
 
     return si, warnings
 
@@ -215,23 +236,40 @@ def run(zos_system, spec: RunSpec, progress_cb=None, cancel_flag=None,
             pass
 
         actual_ztd = spec.ztd_path
+        ztd_found = False
         if spec.ztd_path:
             ztd_name = os.path.basename(spec.ztd_path)
-            candidates = []
+            candidates = [os.path.abspath(spec.ztd_path)]
             if spec.lens_dir:
                 candidates.append(os.path.join(spec.lens_dir, ztd_name))
-            candidates.append(spec.ztd_path)
+            tol_dir = os.path.join(
+                os.path.expanduser("~"), "Documents", "Zemax", "Tolerance", ztd_name)
+            candidates.append(tol_dir)
+            seen = set()
             for c in candidates:
-                if c and os.path.isfile(c):
+                if not c or c in seen:
+                    continue
+                seen.add(c)
+                if os.path.isfile(c):
                     actual_ztd = c
+                    ztd_found = True
                     break
+
+        msg = "" if ok else (str(tol.ErrorMessage) or "运行未成功")
+        if ok and spec.ztd_path and not ztd_found:
+            ok = False
+            searched = spec.lens_dir or os.path.dirname(spec.ztd_path)
+            msg = (f"分析已运行，但未在 {searched} 找到 ZTD 文件 "
+                   f"{os.path.basename(spec.ztd_path)}。"
+                   "请确认 OpticStudio 未弹出阻塞对话框、目录可写，"
+                   "或在公差分析对话框勾选「Save Tolerance Data File」。")
 
         emit(100, "完成" if ok else "失败")
         return RunResult(
             succeeded=ok,
             ztd_path=actual_ztd,
             num_runs=spec.num_runs,
-            message="" if ok else (str(tol.ErrorMessage) or "运行未成功"),
+            message=msg,
             bestworst_folder=bw_folder,
         )
     finally:

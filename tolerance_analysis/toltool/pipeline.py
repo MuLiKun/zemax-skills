@@ -53,7 +53,8 @@ class Prepared:
 
 
 def prepare_session(zmx: str, config: str, outdir: str | None = None,
-                    connect: str = "extension", log=print) -> Prepared:
+                    connect: str = "extension", log=print,
+                    zos_dir: str | None = None) -> Prepared:
     """连接 Zemax、打开工作副本，按 Excel 重建 TDE/MFE/TSC 并 Save。
 
     两方案共用。返回 Prepared，方案A 据此跑蒙卡，方案B 据此提示用户。
@@ -72,7 +73,7 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
     comp_on = not comp_off
     add_comp_operand = comp_on and comp_surface > 0
 
-    sess = zos_connect.ZosSession()
+    sess = zos_connect.ZosSession(zos_dir=zos_dir)
     log(f"ZOS 目录: {sess.zos_dir}")
     sess.connect(mode=connect)
     if connect == "standalone":
