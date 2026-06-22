@@ -89,16 +89,21 @@ def _cmd_run(args) -> int:
         print("（--no-read：跳过 ZTD 读取，请在 OpticStudio 中查看结果）")
         return 0
 
-    report_labels = [
-        str(r.get("标签")).strip()
-        for r in prep.cfg.report if _yes(r.get("启用")) and r.get("标签")
+    report_meta = [
+        r for r in prep.cfg.report if _yes(r.get("启用")) and r.get("标签")
     ]
+    report_labels = [str(r.get("标签")).strip() for r in report_meta]
     num_runs = _as_int(prep.rp.get("蒙特卡洛次数"), 200)
     zres = ztd_reader.read_ztd(
         prep.sess.sys, result.ztd_path, num_runs=num_runs,
-        report_labels=report_labels or None)
+        report_labels=report_labels or None,
+        report_meta=report_meta or None)
     print()
     print(ztd_reader.format_table(zres))
+    if zres.succeeded and _yes(prep.rp.get("输出统计Excel", "N")):
+        stat_path = result.ztd_path.rsplit(".", 1)[0] + "_统计.xlsx"
+        out = ztd_reader.export_excel(zres, stat_path)
+        print(f"统计 Excel: {out}")
     return 0 if zres.succeeded else 1
 
 

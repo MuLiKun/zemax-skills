@@ -49,6 +49,17 @@ DEFAULT_CONFIG = _default_config()
 DEFAULT_OUTDIR = _app_dir()
 
 
+def _yes(v) -> bool:
+    return str(v).strip().upper() in ("Y", "YES", "1", "TRUE", "是")
+
+
+def _as_int(v, default: int) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
 def _apply_dark_titlebar(widget: QtWidgets.QWidget) -> None:
     """Windows 下把窗口标题栏改成深色（DWM 沉浸式暗色模式）。
 
@@ -206,6 +217,29 @@ class _Worker(QtCore.QObject):
             self.log.emit(f"分析完成。ZTD: {result.ztd_path}")
             if result.bestworst_folder:
                 self.log.emit(f"Worst/Best 输出目录: {result.bestworst_folder}")
+
+            if _yes(prep.rp.get("输出统计Excel", "N")):
+                from toltool import ztd_reader
+                report_meta = [
+                    r for r in prep.cfg.report
+                    if _yes(r.get("启用")) and r.get("标签")
+                ]
+                report_labels = [str(r.get("标签")).strip() for r in report_meta]
+                num_runs = _as_int(prep.rp.get("蒙特卡洛次数"), int(spec.num_runs))
+                self.log.emit("正在读取 ZTD 并导出统计 Excel…")
+                zres = ztd_reader.read_ztd(
+                    prep.sess.sys, result.ztd_path, num_runs=num_runs,
+                    report_labels=report_labels or None,
+                    report_meta=report_meta or None)
+                if not zres.succeeded:
+                    self.finished.emit(False, "分析完成，但读取 ZTD 失败：" + zres.message)
+                    return
+                if zres.message:
+                    self.log.emit("提示：" + zres.message)
+                stat_path = result.ztd_path.rsplit(".", 1)[0] + "_统计.xlsx"
+                out = ztd_reader.export_excel(zres, stat_path)
+                self.log.emit(f"统计 Excel: {out}")
+
             self.finished.emit(True, result.ztd_path)
         except zos_connect.ZosDirNotFound as e:
             self.need_zos_dir.emit(list(e.searched))
@@ -225,6 +259,87 @@ class _Worker(QtCore.QObject):
             self._sess = None
 
 
+class _ZtdWorker(QtCore.QObject):
+
+    log = QtCore.Signal(str)
+    finished = QtCore.Signal(bool, str)
+    need_zos_dir = QtCore.Signal(list)
+
+    def __init__(self, ztd: str, config: str, connect: str,
+                 zos_dir: str | None = None):
+        super().__init__()
+        self._ztd = ztd
+        self._config = config
+        self._connect = connect
+        self._zos_dir = zos_dir
+        self._sess = None
+
+    def force_stop(self) -> None:
+        sess = self._sess
+        if sess is not None and self._connect == "standalone":
+            try:
+                sess.close()
+            except Exception:
+                pass
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        sess = None
+        try:
+            from toltool import excel_io, ztd_reader
+
+            self.log.emit(f"读取配置 Excel: {self._config}")
+            cfg = excel_io.read_config(self._config)
+            report_meta = [
+                r for r in cfg.report if _yes(r.get("启用")) and r.get("标签")
+            ]
+            report_labels = [str(r.get("标签")).strip() for r in report_meta]
+            num_runs = _as_int(cfg.run_params.get("蒙特卡洛次数"), 0)
+            if num_runs <= 0:
+                self.finished.emit(False, "配置中的『蒙特卡洛次数』无效，无法确定 ZTD 数据行数。")
+                return
+
+            self.log.emit(f"连接模式: {'Standalone' if self._connect == 'standalone' else 'GUI(交互扩展)'}")
+            sess = zos_connect.ZosSession(zos_dir=self._zos_dir)
+            self._sess = sess
+            self.log.emit(f"ZOS 目录: {sess.zos_dir}")
+            sess.connect(mode=self._connect)
+            if self._connect == "standalone":
+                self.log.emit("已启动 Zemax 独立实例（用于读取已有 ZTD）")
+            else:
+                self.log.emit(f"已连接交互扩展: {sess.sys.SystemFile}")
+
+            self.log.emit(f"正在读取 ZTD: {self._ztd}")
+            zres = ztd_reader.read_ztd(
+                sess.sys, self._ztd, num_runs=num_runs,
+                report_labels=report_labels or None,
+                report_meta=report_meta or None)
+            if not zres.succeeded:
+                self.finished.emit(False, zres.message or "读取 ZTD 失败")
+                return
+            if zres.message:
+                self.log.emit("提示：" + zres.message)
+
+            ztd_dir = os.path.dirname(os.path.abspath(self._ztd))
+            base = os.path.splitext(os.path.basename(self._ztd))[0]
+            stat_path = os.path.join(ztd_dir, base + "_统计.xlsx")
+            out = ztd_reader.export_excel(zres, stat_path)
+            self.log.emit(f"统计 Excel: {out}")
+            self.finished.emit(True, out)
+        except zos_connect.ZosDirNotFound as e:
+            self.need_zos_dir.emit(list(e.searched))
+        except Exception as e:
+            self.finished.emit(False, f"{type(e).__name__}: {e}")
+        finally:
+            if sess is not None and self._connect == "standalone":
+                try:
+                    sess.close()
+                    self.log.emit("已释放 Zemax 独立实例。")
+                except Exception:
+                    pass
+            self._sess = None
+
+
 class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
@@ -234,6 +349,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._thread = None
         self._worker = None
         self._run_args = None
+        self._ztd_args = None
+        self._active_task = ""
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -261,6 +378,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_mode.addItem("Standalone（程序后台挂起，推荐）", "standalone")
         self.cb_mode.addItem("GUI 模式（连入交互扩展窗口）", "extension")
         form.addWidget(self.cb_mode, 3, 1, 1, 2)
+
+        self.ed_ztd = QtWidgets.QLineEdit("")
+        self._add_file_row(form, 4, "已有 ZTD：", self.ed_ztd,
+                           self._pick_ztd)
+
+        ztdbar = QtWidgets.QHBoxLayout()
+        ztdbar.addStretch(1)
+        self.btn_ztd = QtWidgets.QPushButton("分析已有 ZTD")
+        self.btn_ztd.clicked.connect(self._on_analyze_ztd)
+        ztdbar.addWidget(self.btn_ztd)
+        root.addLayout(ztdbar)
 
         btns = QtWidgets.QHBoxLayout()
         btns.addStretch(1)
@@ -336,6 +464,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             self.ed_outdir.setText(path)
 
+    def _pick_ztd(self):
+        start = os.path.dirname(self.ed_ztd.text()) or self.ed_outdir.text()
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "选择已有 ZTD 文件", start,
+            "Zemax 公差数据 (*.ztd *.ZTD);;所有文件 (*.*)")
+        if path:
+            self.ed_ztd.setText(path)
+
     def _append_log(self, text: str):
         self.log_view.appendPlainText(text)
 
@@ -363,7 +499,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self._append_log(f"输出目录: {outdir}")
 
         self._run_args = (zmx, config, outdir, connect)
+        self._active_task = "tol"
         self._start_worker(None)
+
+    def _on_analyze_ztd(self):
+        if self._thread is not None and self._thread.isRunning():
+            self._warn("当前已有任务正在运行，请等待结束后再分析 ZTD。")
+            return
+
+        ztd = self.ed_ztd.text().strip()
+        config = self.ed_config.text().strip()
+        connect = self.cb_mode.currentData()
+
+        if not os.path.isfile(ztd):
+            self._warn("ZTD 文件不存在：\n" + ztd)
+            return
+        if os.path.splitext(ztd)[1].lower() != ".ztd":
+            self._warn("请选择 .ZTD 公差数据文件：\n" + ztd)
+            return
+        if not os.path.isfile(config):
+            self._warn("Excel 配置不存在：\n" + config)
+            return
+
+        self.log_view.clear()
+        self._append_log("开始独立分析已有 ZTD。")
+        self._append_log(f"ZTD 文件: {ztd}")
+        self._append_log(f"配置 Excel: {config}")
+        self._append_log(f"统计输出目录: {os.path.dirname(os.path.abspath(ztd))}")
+
+        self._ztd_args = (ztd, config, connect)
+        self._active_task = "ztd"
+        self._start_ztd_worker(None)
 
     def _start_worker(self, zos_dir):
         if not self._run_args:
@@ -384,6 +550,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker.log.connect(self._append_log)
         self._worker.started.connect(self._on_started)
         self._worker.finished.connect(self._on_finished)
+        self._worker.need_zos_dir.connect(self._on_need_zos_dir)
+        self._thread.start()
+
+    def _start_ztd_worker(self, zos_dir):
+        if not self._ztd_args:
+            self._warn("尚未设置 ZTD 分析参数，请先选择已有 ZTD。")
+            return
+        ztd, config, connect = self._ztd_args
+        self._set_running(True)
+        self._num_runs = 0
+        self._num_to_save = 0
+        self._elapsed = 0
+        self.lbl_elapsed.setText("已用时间 00:00")
+        self.lbl_runinfo.setText("ZTD 分析中")
+        self._timer.start()
+        self._thread = QtCore.QThread(self)
+        self._worker = _ZtdWorker(ztd, config, connect, zos_dir=zos_dir)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.log.connect(self._append_log)
+        self._worker.finished.connect(self._on_ztd_finished)
         self._worker.need_zos_dir.connect(self._on_need_zos_dir)
         self._thread.start()
 
@@ -423,6 +610,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._thread = None
         self._worker = None
         self._set_running(False)
+        self._active_task = ""
         if ok:
             self._append_log("✅ 分析完成。")
             self.statusBar().showMessage("分析完成")
@@ -434,6 +622,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("失败")
             self.lbl_runinfo.setText("已停止")
             self._warn("公差分析失败：\n" + info)
+
+    @QtCore.Slot(bool, str)
+    def _on_ztd_finished(self, ok: bool, info: str):
+        self._timer.stop()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait()
+            self._thread = None
+        self._worker = None
+        self._set_running(False)
+        self._active_task = ""
+        if ok:
+            self._append_log("✅ ZTD 分析完成。")
+            self.statusBar().showMessage("ZTD 分析完成")
+            self.lbl_runinfo.setText("ZTD 分析完成")
+        else:
+            self._append_log("❌ ZTD 分析失败：" + info)
+            self.statusBar().showMessage("ZTD 分析失败")
+            self.lbl_runinfo.setText("ZTD 分析失败")
+            self._warn("ZTD 分析失败：\n" + info)
 
     @QtCore.Slot(list)
     def _on_need_zos_dir(self, searched: list):
@@ -459,6 +667,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.Ok | QtWidgets.QMessageBox.Cancel,
                 QtWidgets.QMessageBox.Ok)
             if ret != QtWidgets.QMessageBox.Ok:
+                self._active_task = ""
                 self._append_log("已取消指定 Zemax 目录。")
                 self.statusBar().showMessage("已取消")
                 return
@@ -478,7 +687,10 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception as e:
                 self._append_log(f"写入配置失败（不影响本次运行）：{e}")
             self._append_log(f"使用 Zemax 目录重新连接：{d}")
-            self._start_worker(d)
+            if self._active_task == "ztd":
+                self._start_ztd_worker(d)
+            else:
+                self._start_worker(d)
             return
 
         self._append_log(f"已连续 {max_attempts} 次未选定有效目录，已停止。")
@@ -486,10 +698,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _set_running(self, running: bool):
         self.btn_run.setEnabled(not running)
-        self.btn_cancel.setEnabled(running)
-        for w in (self.ed_zmx, self.ed_config, self.ed_outdir, self.cb_mode):
+        self.btn_ztd.setEnabled(not running)
+        self.btn_cancel.setEnabled(running and self._active_task == "tol")
+        for w in (self.ed_zmx, self.ed_config, self.ed_outdir,
+                  self.ed_ztd, self.cb_mode):
             w.setEnabled(not running)
-        self.statusBar().showMessage("运行中…" if running else "就绪")
+        if running:
+            msg = "ZTD 分析中…" if self._active_task == "ztd" else "公差分析运行中…"
+        else:
+            msg = "就绪"
+        self.statusBar().showMessage(msg)
 
     def _warn(self, msg: str):
         _dark_message_box(
@@ -498,17 +716,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         if self._thread is not None and self._thread.isRunning():
+            if self._active_task == "ztd":
+                text = (
+                    "ZTD 分析正在运行中。\n\n"
+                    "关闭窗口将中断已有 ZTD 的读取与统计导出，"
+                    "当前统计 Excel 可能不会生成。\n\n确定要关闭吗？")
+            else:
+                text = (
+                    "公差分析正在运行中。\n\n"
+                    "关闭窗口将强制中断蒙特卡洛分析并关闭后台 Zemax 实例，"
+                    "未完成的结果会丢失。\n\n确定要关闭吗？")
             ret = _dark_message_box(
-                self, QtWidgets.QMessageBox.Question, "确认关闭",
-                "公差分析正在运行中。\n\n"
-                "关闭窗口将强制中断蒙特卡洛分析并关闭后台 Zemax 实例，"
-                "未完成的结果会丢失。\n\n确定要关闭吗？",
+                self, QtWidgets.QMessageBox.Question, "确认关闭", text,
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.No)
             if ret != QtWidgets.QMessageBox.Yes:
                 event.ignore()
                 return
-            if self._worker is not None:
+            if self._worker is not None and hasattr(self._worker, "force_stop"):
                 self._worker.force_stop()
             self._thread.quit()
             self._thread.wait(5000)

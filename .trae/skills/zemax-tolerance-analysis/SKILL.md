@@ -48,7 +48,7 @@ description: "Runs Zemax tolerance analysis, merit-function operands, solves, an
 - `CriterionCompIndex`：[0]全部优化(DLS) **[1]近轴焦点** [2]无 [3]全部优化(OD)。
 - `MonteCarloStatisticIndex`：[0]正态 [1]均匀 [2]抛物线。
 - **PowerShell** 列表用 `foreach` 或方括号 `[$i]`（圆括号报 MethodNotFound），`.Count` 取长度（非 `.Length`）。**Python 端 `ListOf*` 返回 None**，改用 `GetXxxAt(i)`+`NumberOfXxx` 遍历。
-- 保存 ZTD：**`SaveTolDataFile=$true`（默认 False，必须显式设）+ `TolDataFile=绝对路径`**（用 `os.path.abspath`，**不要用纯文件名**）。实测纯文件名依赖 Zemax 相对目录解析，在 standalone + 跨盘（镜头不在 C 盘）场景下失效——`Succeeded=True` 却不落盘任何标准目录，造成「假成功」；改绝对路径后稳定。运行后按多候选路径（绝对路径 / 镜头目录 / `Documents\Zemax\Tolerance`）回读确认文件真存在，回读不到应判失败。`OutputFile` 实测不自动落盘。
+- 保存 ZTD：**`SaveTolDataFile=$true`（默认 False，必须显式设）+ `TolDataFile=纯文件名`**（用 `os.path.basename`，含 `.ZTD` 扩展名，**绝不带任何路径**）。Zemax 官方约定：`TolDataFile`/`OutputFile` 只接受文件名，落盘目录强制为**当前镜头文件（工作副本）所在目录**，由 Zemax 决定、不可自定义。传带路径的字符串（含绝对路径）会被判为非法文件名而**静默不落盘**——`Succeeded=True` 却无 ZTD，造成「假成功」。副本在镜头根目录时绝对路径偶能侥幸解析，**副本移入子目录后必然失效**（曾误判为「绝对路径才稳定」，实为侥幸）。正确做法：只传文件名，并**保证工作副本已 SaveAs 到目标输出目录**，ZTD 即随副本落到该目录。运行后按多候选路径（副本目录 / 镜头目录 / `Documents\Zemax\Tolerance`）回读确认文件真存在，回读不到应判失败。`OutputFile` 实测不自动落盘。
 - 保存 Worst/Best：`IsSaveBestWorstUsed=true` + `FilePrefix`。**这是单一开关，无法分别只存 Worst 或只存 Best**；`BestWorstOutputFolder` 实测只读，输出位置由 Zemax 决定，运行后回读。
 
 ### 分项展示：自定义脚本判据（TSC）

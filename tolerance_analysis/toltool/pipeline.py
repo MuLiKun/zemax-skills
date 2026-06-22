@@ -81,13 +81,17 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
     else:
         log(f"已连接交互扩展: {sess.sys.SystemFile}")
 
-    copy = sess.open_as_copy(zmx)
+    src_base, src_ext = os.path.splitext(os.path.basename(zmx))
+    out = os.path.abspath(outdir) if outdir \
+        else os.path.dirname(os.path.abspath(zmx))
+    os.makedirs(out, exist_ok=True)
+    copy_path = os.path.join(out, f"{src_base}_tol{src_ext}")
+
+    copy = sess.open_as_copy(zmx, copy_path=copy_path)
     log(f"工作副本: {copy}")
 
     base = os.path.splitext(os.path.basename(copy))[0]
     lens_dir = os.path.dirname(os.path.abspath(copy))
-    out = outdir or lens_dir
-    os.makedirs(out, exist_ok=True)
 
     test_wl = 0.0
     if center_wave > 0:
