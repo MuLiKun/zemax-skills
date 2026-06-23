@@ -14,12 +14,14 @@ from typing import Any
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.worksheet import Worksheet
 
 
 _HDR_FILL = PatternFill("solid", fgColor="DDEBF7")
 _EX_FILL = PatternFill("solid", fgColor="FFF2CC")
 _HDR_FONT = Font(bold=True)
+_VALIDATION_MIN_ROWS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +30,7 @@ _HDR_FONT = Font(bold=True)
 
 _TOL_WIZARD_HDR = ["启用", "公差类别", "数值", "单位", "起始面", "结束面", "跳过面"]
 _TOL_WIZARD_EX = [
-    ["Y", "半径", 3, "fringe", 3, 13, 9],
+    ["Y", "半径", 3, "光圈", 3, 13, 9],
     ["Y", "厚度", 0.03, "mm", 3, 13, 9],
     ["Y", "面偏心X", 0.02, "mm", 3, 13, 9],
     ["Y", "面偏心Y", 0.02, "mm", 3, 13, 9],
@@ -38,16 +40,18 @@ _TOL_WIZARD_EX = [
     ["Y", "元件偏心Y", 0.02, "mm", 3, 13, 9],
     ["Y", "元件倾斜X", 0.2, "度", 3, 13, 9],
     ["Y", "元件倾斜Y", 0.2, "度", 3, 13, 9],
-    ["Y", "面不规则", 1, "fringe", 3, 13, 9],
+    ["Y", "面不规则", 1, "光圈", 3, 13, 9],
+    ["N", "Zernike不规则度", 1, "光圈", 3, 13, 9],
     ["Y", "折射率", 0.0005, "-", 3, 13, 9],
     ["Y", "阿贝%", 1, "%", 3, 13, 9],
 ]
 
-_TOL_DETAIL_HDR = ["操作", "操作数", "面1", "面2", "Min", "Max", "注释"]
+_TOL_DETAIL_HDR = ["操作数", "面1", "面2", "Min", "Max", "注释"]
+_TOL_DETAIL_LEGACY_HDR = ["操作", "操作数", "面1", "面2", "Min", "Max", "注释"]
 _TOL_DETAIL_EX = [
-    ["追加", "TFRN", 5, 5, -3, 3, "第5面半径3环"],
-    ["覆盖", "TTHI", 6, 6, -0.05, 0.05, "加大第6面厚度公差"],
-    ["删除", "TIRR", 7, 7, "", "", "删除第7面不规则"],
+    ["TFRN", 5, 5, -3, 3, "第5面半径3环"],
+    ["TTHI", 6, 6, -0.05, 0.05, "第6面厚度公差"],
+    ["TIRR", 7, 7, -1, 1, "第7面不规则"],
 ]
 
 _MFE_HDR = ["行号", "操作数",
@@ -102,7 +106,8 @@ _INTRO_LINES = [
     "   输入_*  ：用户实际填写，程序只读取这些 sheet。",
     "2. 每个 sheet 第 1 行是表头；数据从第 2 行开始；空行跳过；# 开头的行视为注释。",
     "3. 公差表两种方式可叠加：先用 输入_公差向导 批量生成默认，",
-    "   再用 输入_公差明细 做覆盖/追加/删除（明细优先级更高）。",
+    "   再用 输入_公差明细 逐行追加公差；该表可直接粘贴 Zemax GUI 中间数据行。",
+    "   旧模板中若仍保留“操作”列，程序仍兼容追加/覆盖/删除。",
     "4. 评价函数 sheet 的 行号 与 REPORT sheet 的 MF行号 一一对应。",
     "5. 每个启用的 REPORT 行将在蒙特卡洛结果中成为一个独立分项列。",
     "6. 运行参数中 保存TSC 始终为 Y；保存WorstCase/BestCase 由用户选择 Y/N。",
@@ -137,6 +142,36 @@ def _write_table(ws: Worksheet, header: list[str], rows: list[list[Any]],
             max(10, len(str(name)) + 4)
 
 
+def _add_list_validation(ws: Worksheet, target: str, values: list[str], rows: int | None = None) -> None:
+    formula = '"' + ','.join(values) + '"'
+    dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+    ws.add_data_validation(dv)
+    if ":" in target:
+        cell_range = target
+    else:
+        min_rows = _VALIDATION_MIN_ROWS if rows is None else int(rows)
+        end_row = max(ws.max_row, min_rows, 2)
+        cell_range = f"{target}2:{target}{end_row}"
+    dv.add(cell_range)
+
+
+def _apply_template_validations(ws: Worksheet, name: str) -> None:
+    if name == "公差向导":
+        _add_list_validation(ws, "A", ["Y", "N"])
+        _add_list_validation(ws, "B", [
+            "半径", "曲率半径", "厚度", "面偏心X", "面偏心Y",
+            "面倾斜X", "面倾斜Y", "元件偏心X", "元件偏心Y",
+            "元件倾斜X", "元件倾斜Y", "面不规则",
+            "Zernike不规则度", "折射率", "阿贝%",
+        ])
+        for row in range(2, ws.max_row + 1):
+            cat = str(ws.cell(row=row, column=2).value or "").strip()
+            if cat in ("半径", "曲率半径"):
+                _add_list_validation(ws, f"D{row}:D{row}", ["光圈", "毫米", "百分比"])
+            elif cat in ("面倾斜X", "面倾斜Y"):
+                _add_list_validation(ws, f"D{row}:D{row}", ["度", "毫米"])
+
+
 def generate_template(path: str, overwrite: bool = False) -> str:
     """生成带示例与输入双 sheet 的配置模板。返回写入路径。"""
     if os.path.exists(path) and not overwrite:
@@ -154,9 +189,11 @@ def generate_template(path: str, overwrite: bool = False) -> str:
     for name, header, ex in _SHEET_DEFS:
         ws_ex = wb.create_sheet(f"示例_{name}")
         _write_table(ws_ex, header, ex, highlight=True)
+        _apply_template_validations(ws_ex, name)
         ws_in = wb.create_sheet(f"输入_{name}")
         prefill = ex if name in ("公差向导", "运行参数") else []
         _write_table(ws_in, header, prefill, highlight=False)
+        _apply_template_validations(ws_in, name)
 
     wb.save(path)
     return path
@@ -188,6 +225,16 @@ def _read_sheet_rows(ws: Worksheet, header: list[str]) -> list[dict]:
     return rows
 
 
+def _read_tol_detail_rows(ws: Worksheet) -> list[dict]:
+    first_header = str(ws.cell(row=1, column=1).value or "").strip()
+    if first_header == "操作":
+        return _read_sheet_rows(ws, _TOL_DETAIL_LEGACY_HDR)
+    rows = _read_sheet_rows(ws, _TOL_DETAIL_HDR)
+    for row in rows:
+        row["操作"] = "追加"
+    return rows
+
+
 def read_config(path: str) -> Config:
     wb = load_workbook(path, data_only=True)
     cfg = Config()
@@ -199,7 +246,7 @@ def read_config(path: str) -> Config:
         return wb[sn]
 
     cfg.tol_wizard = _read_sheet_rows(sheet("公差向导"), _TOL_WIZARD_HDR)
-    cfg.tol_detail = _read_sheet_rows(sheet("公差明细"), _TOL_DETAIL_HDR)
+    cfg.tol_detail = _read_tol_detail_rows(sheet("公差明细"))
     cfg.mfe = _read_sheet_rows(sheet("评价函数"), _MFE_HDR)
     cfg.report = _read_sheet_rows(sheet("REPORT"), _REPORT_HDR)
     for row in _read_sheet_rows(sheet("运行参数"), _RUN_HDR):

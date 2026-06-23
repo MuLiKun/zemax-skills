@@ -25,8 +25,8 @@ description: "Runs Zemax tolerance analysis, merit-function operands, solves, an
 
 - `toltool/pipeline.py`：单一来源 `prepare_session()`（连接→TDE→MFE→TSC→Save）+ `run_montecarlo()`。
 - `toltool/tol_runner.py`：配置并运行脚本式蒙卡（界面解耦，progress_cb/cancel_flag）。
-- `toltool/ztd_reader.py`：读 ZTD MonteCarloData 出分项统计。
-- `gui.py`：PySide6 暗色界面，QThread 后台跑蒙卡 + 信号回调日志/计时，业务全复用 pipeline；不重复任何公差逻辑。
+- `toltool/ztd_reader.py`：读 ZTD MonteCarloData 出分项统计；Cpk1.33 上下限双边输出，按方向标黄用户关注侧（越小越好=上限，越大越好=下限）。
+- `gui.py`：PySide6 暗色界面，QThread 后台跑蒙卡 + 信号回调日志/计时，业务全复用 pipeline；记住上次文件、目录与连接模式；不重复任何公差逻辑。
 - 使用说明见 `公差分析程序_使用说明.md`，需求见 `公差分析程序_需求文档.md`。
 
 ## 连接
@@ -72,6 +72,7 @@ Criterion 是单一标量，一次只输出一个判据分布。要把点列/GEN
 - `$dv.Summary`：各 REPORT 分项标称值 + 每项公差灵敏度贡献。
 - `$dv.MonteCarloData.Values`：矩阵，前若干列即 TSC 的 REPORT 分项（顺序同 REPORT）。
 - `$dv.SensitivityData`：灵敏度数据。
+- 导出统计 Excel 时，Cpk1.33 下限/上限始终双边输出；方向只用于标黄关注侧，不用于隐藏另一侧。
 
 **读取陷阱（否则全 NaN / 循环不执行）：**
 1. **PowerShell 变量名大小写不敏感**：`$R`(行数) 与 `$r`(计数) 是同一变量，`for($r=0;$r -lt $R)` 会清零 `$R`。循环/边界变量用不冲突的名字（`$i/$j/$nrow/$ncol`）。Python 无此坑。

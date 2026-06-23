@@ -192,6 +192,19 @@ def _fmt_tool_line(label: str, name: str, value: str) -> str:
     return f"  - {label}（{name}）：{value}"
 
 
+_COMMON_TOOL_FIELDS = (
+    ("NumberToSave", "保存案例数量"),
+    ("IsSaveBestWorstUsed", "是否保存Worst/Best"),
+    ("FilePrefix", "案例文件前缀"),
+    ("SaveTolDataFile", "是否保存ZTD"),
+    ("TolDataFile", "ZTD文件名"),
+)
+
+
+def _format_tool_fields(tol, fields: tuple[tuple[str, str], ...]) -> list[str]:
+    return [_fmt_tool_line(label, name, _safe_text(tol, name)) for name, label in fields]
+
+
 def _tool_setting_lines(tol) -> list[str]:
     fields = (
         ("SetupModeIndex", "运行模式索引"),
@@ -200,13 +213,9 @@ def _tool_setting_lines(tol) -> list[str]:
         ("CriterionCompIndex", "工具栏补偿器索引"),
         ("MonteCarloStatisticIndex", "蒙特卡洛分布索引"),
         ("NumberOfRuns", "蒙特卡洛次数"),
-        ("NumberToSave", "保存案例数量"),
-        ("IsSaveBestWorstUsed", "是否保存Worst/Best"),
-        ("FilePrefix", "案例文件前缀"),
-        ("SaveTolDataFile", "是否保存ZTD"),
-        ("TolDataFile", "ZTD文件名"),
+        *_COMMON_TOOL_FIELDS,
     )
-    return [_fmt_tool_line(label, name, _safe_text(tol, name)) for name, label in fields]
+    return _format_tool_fields(tol, fields)
 
 
 def _tool_result_lines(tol) -> list[str]:
@@ -214,14 +223,11 @@ def _tool_result_lines(tol) -> list[str]:
         ("Succeeded", "Zemax是否判定成功"),
         ("ErrorMessage", "Zemax错误信息"),
         ("Progress", "Zemax进度"),
-        ("NumberToSave", "保存案例数量"),
-        ("IsSaveBestWorstUsed", "是否保存Worst/Best"),
+        *_COMMON_TOOL_FIELDS[:2],
         ("BestWorstOutputFolder", "Worst/Best输出目录"),
-        ("FilePrefix", "案例文件前缀"),
-        ("SaveTolDataFile", "是否保存ZTD"),
-        ("TolDataFile", "ZTD文件名"),
+        *_COMMON_TOOL_FIELDS[2:],
     )
-    return [_fmt_tool_line(label, name, _safe_text(tol, name)) for name, label in fields]
+    return _format_tool_fields(tol, fields)
 
 
 def configure(tol, spec: RunSpec):

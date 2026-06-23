@@ -47,6 +47,8 @@ def _default_config() -> str:
 DEFAULT_ZMX = ""
 DEFAULT_CONFIG = _default_config()
 DEFAULT_OUTDIR = _app_dir()
+SETTINGS_ORG = os.environ.get("ZEMAX_TOL_SETTINGS_ORG", "ZemaxTools")
+SETTINGS_APP = os.environ.get("ZEMAX_TOL_SETTINGS_APP", "ZemaxToleranceTool")
 
 
 def _yes(v) -> bool:
@@ -351,6 +353,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._run_args = None
         self._ztd_args = None
         self._active_task = ""
+        self._settings = QtCore.QSettings(SETTINGS_ORG, SETTINGS_APP)
 
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
@@ -363,9 +366,12 @@ class MainWindow(QtWidgets.QMainWindow):
         form.setVerticalSpacing(8)
         root.addLayout(form)
 
-        self.ed_zmx = QtWidgets.QLineEdit(DEFAULT_ZMX)
-        self.ed_config = QtWidgets.QLineEdit(DEFAULT_CONFIG)
-        self.ed_outdir = QtWidgets.QLineEdit(DEFAULT_OUTDIR)
+        self.ed_zmx = QtWidgets.QLineEdit(
+            self._setting("zmx", DEFAULT_ZMX))
+        self.ed_config = QtWidgets.QLineEdit(
+            self._setting("config", DEFAULT_CONFIG))
+        self.ed_outdir = QtWidgets.QLineEdit(
+            self._setting("outdir", DEFAULT_OUTDIR))
         self._add_file_row(form, 0, "待分析 zmx：", self.ed_zmx,
                            self._pick_zmx)
         self._add_file_row(form, 1, "Excel 配置：", self.ed_config,
@@ -377,9 +383,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_mode = QtWidgets.QComboBox()
         self.cb_mode.addItem("Standalone（程序后台挂起，推荐）", "standalone")
         self.cb_mode.addItem("GUI 模式（连入交互扩展窗口）", "extension")
+        mode_index = self.cb_mode.findData(self._setting("connect", "standalone"))
+        if mode_index >= 0:
+            self.cb_mode.setCurrentIndex(mode_index)
+        self.cb_mode.currentIndexChanged.connect(
+            lambda: self._settings.setValue(
+                "connect", self.cb_mode.currentData()))
         form.addWidget(self.cb_mode, 3, 1, 1, 2)
 
-        self.ed_ztd = QtWidgets.QLineEdit("")
+        self.ed_ztd = QtWidgets.QLineEdit(self._setting("ztd", ""))
         self._add_file_row(form, 4, "已有 ZTD：", self.ed_ztd,
                            self._pick_ztd)
 
@@ -444,33 +456,73 @@ class MainWindow(QtWidgets.QMainWindow):
         btn.clicked.connect(slot)
         grid.addWidget(btn, row, 2)
 
+    def _setting(self, key: str, default: str = "") -> str:
+        return str(self._settings.value(key, default) or "")
+
+    def _remember_path(self, key: str, path: str) -> None:
+        if path:
+            self._settings.setValue(key, path)
+            if os.path.isfile(path):
+                d = os.path.dirname(path)
+            elif os.path.isdir(path):
+                d = path
+            else:
+                d = ""
+            if d:
+                self._settings.setValue("last_dir", d)
+
+    def _dialog_dir(self, path: str, fallback: str = "") -> str:
+        path = str(path or "").strip()
+        if os.path.isfile(path):
+            return os.path.dirname(path)
+        if os.path.isdir(path):
+            return path
+        fallback = str(fallback or "").strip()
+        if fallback and os.path.isdir(fallback):
+            return fallback
+        last_dir = self._setting("last_dir", "")
+        if last_dir and os.path.isdir(last_dir):
+            return last_dir
+        return _app_dir()
+
+    def _remember_form_paths(self) -> None:
+        self._remember_path("zmx", self.ed_zmx.text().strip())
+        self._remember_path("config", self.ed_config.text().strip())
+        self._remember_path("outdir", self.ed_outdir.text().strip())
+        self._remember_path("ztd", self.ed_ztd.text().strip())
+        self._settings.setValue("connect", self.cb_mode.currentData())
+
     def _pick_zmx(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择 zmx 文件", os.path.dirname(self.ed_zmx.text()),
+            self, "选择 zmx 文件", self._dialog_dir(self.ed_zmx.text()),
             "Zemax 镜头 (*.zmx *.zos);;所有文件 (*.*)")
         if path:
             self.ed_zmx.setText(path)
+            self._remember_path("zmx", path)
 
     def _pick_config(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择 Excel 配置", os.path.dirname(self.ed_config.text()),
+            self, "选择 Excel 配置", self._dialog_dir(self.ed_config.text()),
             "Excel (*.xlsx);;所有文件 (*.*)")
         if path:
             self.ed_config.setText(path)
+            self._remember_path("config", path)
 
     def _pick_outdir(self):
         path = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "选择输出目录", self.ed_outdir.text())
+            self, "选择输出目录", self._dialog_dir(self.ed_outdir.text()))
         if path:
             self.ed_outdir.setText(path)
+            self._remember_path("outdir", path)
 
     def _pick_ztd(self):
-        start = os.path.dirname(self.ed_ztd.text()) or self.ed_outdir.text()
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择已有 ZTD 文件", start,
+            self, "选择已有 ZTD 文件",
+            self._dialog_dir(self.ed_ztd.text(), self.ed_outdir.text()),
             "Zemax 公差数据 (*.ztd *.ZTD);;所有文件 (*.*)")
         if path:
             self.ed_ztd.setText(path)
+            self._remember_path("ztd", path)
 
     def _append_log(self, text: str):
         self.log_view.appendPlainText(text)
@@ -490,6 +542,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not outdir:
             outdir = os.path.join(_HERE, "output")
         os.makedirs(outdir, exist_ok=True)
+        self.ed_outdir.setText(outdir)
+        self._remember_form_paths()
 
         self.log_view.clear()
         self._append_log(
@@ -520,6 +574,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not os.path.isfile(config):
             self._warn("Excel 配置不存在：\n" + config)
             return
+        self._remember_form_paths()
 
         self.log_view.clear()
         self._append_log("开始独立分析已有 ZTD。")

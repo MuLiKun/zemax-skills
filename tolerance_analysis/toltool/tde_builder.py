@@ -3,7 +3,7 @@
 职责（需求文档 §4.3/§4.4/§7、§10.2）：
 - 按「输入_公差向导」调用 Zemax 原生 SEQToleranceWizard 生成基础公差表，
   由 Zemax 自行做元件分组、玻璃/空气识别、阿贝数换算（物理正确）。
-- 再按「输入_公差明细」对生成的 TDE 做覆盖/追加/删除（明细优先级最高）。
+- 再按「输入_公差明细」对生成的 TDE 追加逐行公差；旧模板仍兼容覆盖/删除。
 
 为什么用原生向导（实测对比结论）：
 - 自写逐面展开与 Zemax 原生向导在「成对面分组、表面/元件公差区分、
@@ -12,14 +12,15 @@
 SEQToleranceWizard 真实属性（probe 实测，2023 R1）：
 - 范围：StartAtSurface / StopAtSurface（全局一组，向导不支持逐类范围/跳过面）。
 - 半径：IsSurfaceRadiusUsed + SurfaceRadiusUnitType(DefaultAndFringes:
-  0=Default,1=Fringes) + SurfaceRadiusFringes / SurfaceRadiusPercent。
+  0=Default,1=Fringes) + SurfaceRadius / SurfaceRadiusFringes / SurfaceRadiusPercent。
 - 厚度：IsSurfaceThicknessUsed + SurfaceThickness。
 - 面偏心：IsSurfaceDecenterX/YUsed + SurfaceDecenterX/Y。
-- 面倾斜：IsSurfaceTiltX/YUsed + SurfaceTiltXUnitType(DefaultAndDegrees) +
-  SurfaceTiltXDegrees / SurfaceTiltYDegrees。
+- 面倾斜：IsSurfaceTiltX/YUsed + SurfaceTiltX/YUnitType(DefaultAndDegrees) +
+  SurfaceTiltX/Y 或 SurfaceTiltX/YDegrees。
 - 元件偏心：IsElementDecenterX/YUsed + ElementDecenterX/Y。
 - 元件倾斜：IsElementTiltX/YUsed + ElementTiltXDegrees / ElementTiltYDegrees。
 - 不规则：IsSurfaceSandAIrregularityUsed + SurfaceSandAIrregularityFringes。
+- Zernike不规则：IsSurfaceZernikeIrregularityUsed + SurfaceZernikeIrregularityFringes。
 - 折射率：IsIndexUsed + Index。
 - 阿贝%：IsIndexAbbePercentageUsed + IndexAbbePercentage。
 - 焦点补偿：IsFocusCompensationUsed。
@@ -60,6 +61,55 @@ def _num(v, default=None):
     return float(v)
 
 
+def _cat_name(v) -> str:
+    text = str(v or "").strip().replace(" ", "")
+    aliases = {
+        "曲率半径": "半径",
+        "曲率半径公差": "半径",
+        "Zernike不规则": "Zernike不规则度",
+        "Zernike不规则度": "Zernike不规则度",
+        "泽尼克不规则": "Zernike不规则度",
+        "泽尼克不规则度": "Zernike不规则度",
+    }
+    return aliases.get(text, text)
+
+
+def _unit_name(v, default: str = "") -> str:
+    text = str(v or default or "").strip().lower().replace(" ", "")
+    aliases = {
+        "": default,
+        "fringe": "光圈",
+        "fringes": "光圈",
+        "光圈": "光圈",
+        "圈": "光圈",
+        "mm": "毫米",
+        "毫米": "毫米",
+        "millimeter": "毫米",
+        "millimeters": "毫米",
+        "%": "百分比",
+        "percent": "百分比",
+        "percentage": "百分比",
+        "百分比": "百分比",
+        "度": "度",
+        "deg": "度",
+        "degree": "度",
+        "degrees": "度",
+    }
+    return aliases.get(text, text)
+
+
+def _set_first_existing(obj, names: tuple[str, ...], value) -> str:
+    last_error = None
+    for name in names:
+        try:
+            setattr(obj, name, value)
+            return name
+        except Exception as e:
+            last_error = e
+    joined = "/".join(names)
+    raise AttributeError(f"Zemax API 不支持或无法写入 {joined}: {last_error}")
+
+
 # ---------------------------------------------------------------------------
 # 公差向导 sheet → 原生向导设置
 # ---------------------------------------------------------------------------
@@ -76,7 +126,10 @@ _CATEGORY_MAP = {
     "元件偏心Y": ("IsElementDecenterYUsed", "ElementDecenterY"),
     "元件倾斜X": ("IsElementTiltXUsed", "ElementTiltXDegrees"),
     "元件倾斜Y": ("IsElementTiltYUsed", "ElementTiltYDegrees"),
-    "面不规则": ("IsSurfaceSandAIrregularityUsed", "SurfaceSandAIrregularityFringes"),
+    "面不规则": ("IsSurfaceSandAIrregularityUsed",
+              "SurfaceSandAIrregularityFringes"),
+    "Zernike不规则度": ("IsSurfaceZernikeIrregularityUsed",
+                    "SurfaceZernikeIrregularityFringes"),
     "折射率": ("IsIndexUsed", "Index"),
     "阿贝%": ("IsIndexAbbePercentageUsed", "IndexAbbePercentage"),
 }
@@ -133,30 +186,71 @@ def run_native_wizard(zos_system, wizard_rows: list[dict],
     for row in wizard_rows:
         if not _is_yes(row.get("启用")):
             continue
-        cat = str(row.get("公差类别", "")).strip()
+        cat = _cat_name(row.get("公差类别"))
         if cat not in _CATEGORY_MAP:
-            raise ValueError(f"未知公差类别: {cat!r}（向导）")
-        enabled[cat] = _num(row.get("数值"))
+            raise ValueError(f"未知公差类别: {row.get('公差类别')!r}（向导）")
+        enabled[cat] = (_num(row.get("数值")), row.get("单位"))
 
     DF = ZOSAPI.Wizards.DefaultAndFringes
     DD = ZOSAPI.Wizards.DefaultAndDegrees
 
-    for cat, val in enabled.items():
+    for cat, item in enabled.items():
+        val, unit_raw = item
         switch_attr, value_attr = _CATEGORY_MAP[cat]
-        setattr(wiz, switch_attr, True)
-        if val is None:
-            continue
-        if cat == "半径":
-            wiz.SurfaceRadiusUnitType = DF.Fringes
-            wiz.SurfaceRadiusFringes = float(val)
-        elif cat == "面倾斜X":
-            wiz.SurfaceTiltXUnitType = DD.Degrees
-            wiz.SurfaceTiltXDegrees = float(val)
-        elif cat == "面倾斜Y":
-            wiz.SurfaceTiltYUnitType = DD.Degrees
-            wiz.SurfaceTiltYDegrees = float(val)
-        else:
-            setattr(wiz, value_attr, float(val))
+        unit = _unit_name(unit_raw, "默认")
+        try:
+            setattr(wiz, switch_attr, True)
+            if val is None:
+                continue
+            if cat == "半径":
+                radius_unit = _unit_name(unit_raw, "光圈")
+                if radius_unit == "光圈":
+                    wiz.SurfaceRadiusUnitType = DF.Fringes
+                    wiz.SurfaceRadiusFringes = float(val)
+                elif radius_unit == "毫米":
+                    wiz.SurfaceRadiusUnitType = DF.Default
+                    _set_first_existing(wiz, ("SurfaceRadius",), float(val))
+                elif radius_unit == "百分比":
+                    wiz.SurfaceRadiusUnitType = DF.Percent
+                    _set_first_existing(wiz, ("SurfaceRadiusPercent",), float(val))
+                else:
+                    raise ValueError("半径/曲率半径单位仅支持 毫米、光圈/fringe、百分比")
+            elif cat == "面倾斜X":
+                tilt_unit = _unit_name(unit_raw, "度")
+                if tilt_unit == "度":
+                    wiz.SurfaceTiltXUnitType = DD.Degrees
+                    _set_first_existing(wiz, ("SurfaceTiltXDegrees",), float(val))
+                elif tilt_unit == "毫米":
+                    wiz.SurfaceTiltXUnitType = DD.Default
+                    _set_first_existing(wiz, ("SurfaceTiltX",), float(val))
+                else:
+                    raise ValueError("面倾斜单位仅支持 度、毫米")
+            elif cat == "面倾斜Y":
+                tilt_unit = _unit_name(unit_raw, "度")
+                if tilt_unit == "度":
+                    wiz.SurfaceTiltYUnitType = DD.Degrees
+                    _set_first_existing(wiz, ("SurfaceTiltYDegrees",), float(val))
+                elif tilt_unit == "毫米":
+                    wiz.SurfaceTiltYUnitType = DD.Default
+                    _set_first_existing(wiz, ("SurfaceTiltY",), float(val))
+                else:
+                    raise ValueError("面倾斜单位仅支持 度、毫米")
+            elif cat == "Zernike不规则度":
+                zernike_unit = _unit_name(unit_raw, "光圈")
+                if zernike_unit != "光圈":
+                    raise ValueError("Zernike不规则度单位仅支持 光圈/fringe")
+                _set_first_existing(wiz, (
+                    value_attr,
+                    "SurfaceZernikeIrregularity",
+                ), float(val))
+            else:
+                setattr(wiz, value_attr, float(val))
+        except Exception as e:
+            unit_text = "默认" if unit_raw is None else str(unit_raw).strip() or "默认"
+            raise RuntimeError(
+                f"写入 Zemax 公差向导失败：类别={cat}，单位={unit_text}，数值={val}。"
+                f"请检查该 Zemax 版本是否支持对应公差操作数/单位。原始错误：{type(e).__name__}: {e}"
+            ) from e
 
     s0, s1 = _wizard_range(wizard_rows)
     if s0 and s1:
@@ -167,7 +261,17 @@ def run_native_wizard(zos_system, wizard_rows: list[dict],
         wiz.TestWavelength = float(test_wavelength_um)
     wiz.IsFocusCompensationUsed = bool(focus_compensation)
 
-    wiz.OK()
+    try:
+        wiz.OK()
+    except Exception as e:
+        rows = "; ".join(
+            f"{cat}(单位={unit or '默认'}, 数值={val})"
+            for cat, (val, unit) in enabled.items())
+        raise RuntimeError(
+            "Zemax 生成 TDE 公差表失败。"
+            f"已启用公差：{rows or '无'}。"
+            f"ZOS-API 未暴露更细的 GUI 操作数日志；原始错误：{type(e).__name__}: {e}"
+        ) from e
     return zos_system.TDE.NumberOfOperands
 
 
@@ -204,7 +308,7 @@ def apply_detail_to_tde(zos_system, detail_rows: list[dict]) -> int:
     changed = 0
 
     for row in detail_rows:
-        action = str(row.get("操作", "")).strip()
+        action = str(row.get("操作") or "追加").strip()
         op = str(row.get("操作数", "")).strip().upper()
         if not op:
             continue

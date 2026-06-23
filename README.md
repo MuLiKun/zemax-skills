@@ -24,7 +24,7 @@ agentstudy/
 - 连接 OpticStudio（交互扩展 / 独立实例）
 - 按 Excel 配置自动写公差表（TDE）、评价函数（MFE）、生成 TSC 脚本
 - 跑脚本式蒙特卡洛公差分析，保存 ZTD / Worst / Best Case
-- 读取 ZTD，把点列 / GENC / 几何 MTF 等各 REPORT 分项独立成列做统计，并导出统计 Excel
+- 读取 ZTD，把点列 / GENC / 几何 MTF 等各 REPORT 分项独立成列做统计，并导出统计 Excel；Cpk1.33 上下限双边输出，按方向标黄用户关注侧
 - 支持独立分析已有 ZTD；表头优先从同名 TSC 的 `REPORT "标签" 行号` 反推
 
 ## 快速上手
@@ -55,6 +55,7 @@ cd tolerance_analysis
 
 > 仅记录功能层面的主要变更，便于追溯。日期格式 YYYY-MM-DD。
 
+- **2026-06-23** GUI 与统计可用性增强：GUI 记住上次文件/目录/连接模式；统计 Excel 的 Cpk1.33 上下限双边输出，并按方向标黄用户关注侧。
 - **2026-06-23** 公差运行诊断增强：GUI 日志会输出 Zemax 公差工具关键设置与运行结果，失败时附带 `Succeeded`、`ErrorMessage`、`NumberToSave`、`SaveTolDataFile`、`TolDataFile` 等状态，并补充 Zemax 数据目录下 `Tolerance` 的 ZTD 查找路径。
 - **2026-06-22** ZTD 统计模块增强：GUI 支持独立分析已有 ZTD，统计 Excel 默认启用并输出到 ZTD 同目录；ZTD 表头优先从同名 TSC 反推，找不到 TSC 时保留 colN 兜底。
 - **2026-06-21** GUI 移植性增强：Zemax 安装目录改为分层智能查找（显式 → INI 配置 → 环境变量 `ZEMAX_ZOS_DIR` → 注册表+多盘 glob 搜索）；自动找不到时弹窗引导手动选目录并写入 `zemax_config.ini` 永久记住，换电脑免改代码。

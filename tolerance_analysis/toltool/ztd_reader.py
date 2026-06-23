@@ -7,7 +7,7 @@
     col1..colN = N 个 REPORT 分项，顺序与 TSC 的 REPORT 完全一致
     其后各列 = 各单项公差灵敏度数据（本模块不解析）
 - 对每个分项列统计：有效次数 N / 均值 / 标准差 / 最好 / 最差 / 2σ / 百分位。
-- 按 REPORT 方向反推 Cpk=1.33 所需规格限。
+- Cpk=1.33 规格限双边输出，并按 REPORT 方向标记用户更关注的一侧。
 - 标签优先用调用方传入的 REPORT 标签；否则从 Summary「相对评估脚本」段解析。
 
 读取陷阱（skill §2e，务必遵守）：
@@ -271,12 +271,16 @@ def _cpk_limits(mean: float, std: float, direction: str, cpk: float = _CPK_TARGE
     if math.isnan(mean) or math.isnan(std):
         return float("nan"), float("nan")
     span = 3.0 * cpk * std
+    return mean - span, mean + span
+
+
+def _direction_focus(direction: str) -> str:
     d = str(direction or "").strip().lower()
     if "小" in d or d in ("min", "smaller", "lower", "less", "小于"):
-        return float("nan"), mean + span
+        return "upper"
     if "大" in d or d in ("max", "larger", "higher", "greater", "大于"):
-        return mean - span, float("nan")
-    return mean - span, mean + span
+        return "lower"
+    return ""
 
 
 def _stats(values, direction: str = ""):
@@ -474,6 +478,7 @@ def export_excel(result: ZtdResult, path: str) -> str:
     headers = ["项目"] + [it.label for it in result.items]
     header_fill = PatternFill("solid", fgColor="DDEBF7")
     stat_fill = PatternFill("solid", fgColor="FFF2CC")
+    focus_fill = PatternFill("solid", fgColor="FFFF00")
     data_fill = PatternFill("solid", fgColor="E2F0D9")
     font = Font(bold=True)
     for c, h in enumerate(headers, start=1):
@@ -504,7 +509,13 @@ def export_excel(result: ZtdResult, path: str) -> str:
         else:
             name_cell.fill = data_fill
         for c, value in enumerate(values, start=2):
-            ws.cell(row=r, column=c, value=value)
+            cell = ws.cell(row=r, column=c, value=value)
+            item = result.items[c - 2] if c - 2 < len(result.items) else None
+            focus = _direction_focus(item.direction) if item else ""
+            if (name == "Cpk1.33下限" and focus == "lower") or (
+                    name == "Cpk1.33上限" and focus == "upper"):
+                cell.fill = focus_fill
+                cell.font = font
 
     ws.freeze_panes = "B9"
     ws.auto_filter.ref = ws.dimensions
@@ -522,9 +533,10 @@ def export_excel(result: ZtdResult, path: str) -> str:
         ["蒙特卡洛次数", result.num_runs],
         ["矩阵列数", result.num_cols],
         ["Cpk目标", _CPK_TARGET],
-        ["方向=小", "只反推上限：USL = 均值 + 3*Cpk*标准差"],
-        ["方向=大", "只反推下限：LSL = 均值 - 3*Cpk*标准差"],
-        ["方向为空", "反推双边范围：均值 ± 3*Cpk*标准差"],
+        ["Cpk1.33下限", "LSL = 均值 - 3*Cpk*标准差"],
+        ["Cpk1.33上限", "USL = 均值 + 3*Cpk*标准差"],
+        ["方向", "方向保留用于标识越小越好/越大越好；统计 Excel 始终输出双边上下限。"],
+        ["黄色标记", "方向为越小越好时标黄 Cpk1.33上限；方向为越大越好时标黄 Cpk1.33下限。"],
     ]
     if result.message:
         lines.append(["提示", result.message])
