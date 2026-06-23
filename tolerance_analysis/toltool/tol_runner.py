@@ -156,6 +156,74 @@ def _ztd_expected_path(path: str) -> str:
     return os.path.join(folder, _ztd_file_name(path))
 
 
+def _safe_text(obj, name: str, default="") -> str:
+    try:
+        value = getattr(obj, name)
+        if value is None:
+            return str(default) if default != "" else "无"
+        return str(value)
+    except Exception as e:
+        return f"<读取失败: {e}>" if default == "" else str(default)
+
+
+def _tool_error_message(tol) -> str:
+    try:
+        value = getattr(tol, "ErrorMessage")
+    except Exception as e:
+        return f"读取 Zemax 错误信息失败：{e}"
+    text = str(value or "").strip()
+    if not text or text.lower() == "none":
+        return "运行未成功"
+    return text
+
+
+def _zemax_tolerance_dir(zos_system) -> str:
+    try:
+        mf_dir = str(zos_system.MFE.MeritFunctionDirectory or "")
+        if not mf_dir:
+            return ""
+        data_dir = os.path.dirname(mf_dir.rstrip("\\/"))
+        return os.path.join(data_dir, "Tolerance")
+    except Exception:
+        return ""
+
+
+def _fmt_tool_line(label: str, name: str, value: str) -> str:
+    return f"  - {label}（{name}）：{value}"
+
+
+def _tool_setting_lines(tol) -> list[str]:
+    fields = (
+        ("SetupModeIndex", "运行模式索引"),
+        ("CriterionIndex", "判据索引"),
+        ("CriterionScript", "TSC脚本索引"),
+        ("CriterionCompIndex", "工具栏补偿器索引"),
+        ("MonteCarloStatisticIndex", "蒙特卡洛分布索引"),
+        ("NumberOfRuns", "蒙特卡洛次数"),
+        ("NumberToSave", "保存案例数量"),
+        ("IsSaveBestWorstUsed", "是否保存Worst/Best"),
+        ("FilePrefix", "案例文件前缀"),
+        ("SaveTolDataFile", "是否保存ZTD"),
+        ("TolDataFile", "ZTD文件名"),
+    )
+    return [_fmt_tool_line(label, name, _safe_text(tol, name)) for name, label in fields]
+
+
+def _tool_result_lines(tol) -> list[str]:
+    fields = (
+        ("Succeeded", "Zemax是否判定成功"),
+        ("ErrorMessage", "Zemax错误信息"),
+        ("Progress", "Zemax进度"),
+        ("NumberToSave", "保存案例数量"),
+        ("IsSaveBestWorstUsed", "是否保存Worst/Best"),
+        ("BestWorstOutputFolder", "Worst/Best输出目录"),
+        ("FilePrefix", "案例文件前缀"),
+        ("SaveTolDataFile", "是否保存ZTD"),
+        ("TolDataFile", "ZTD文件名"),
+    )
+    return [_fmt_tool_line(label, name, _safe_text(tol, name)) for name, label in fields]
+
+
 def configure(tol, spec: RunSpec):
     """把 RunSpec 写入已打开的 Tolerancing 工具。返回 (script_index, warnings)。"""
     warnings: list[str] = []
@@ -239,8 +307,14 @@ def run(zos_system, spec: RunSpec, progress_cb=None, cancel_flag=None,
         _si, warns = configure(tol, spec)
         for w in warns:
             emit(0, "提示：" + w)
+        emit(0, "Zemax公差工具设置：\n" + "\n".join(_tool_setting_lines(tol)))
         emit(1, f"开始运行：{spec.num_runs} 次蒙特卡洛")
-        tol.Run()
+        try:
+            tol.Run()
+        except Exception as e:
+            lines = "\n".join(_tool_result_lines(tol))
+            return RunResult(False, spec.ztd_path, spec.num_runs,
+                             message=f"Zemax 公差工具启动失败：{type(e).__name__}: {e}\n工具状态：\n{lines}")
 
         start = time.time()
         running_notified = False
@@ -262,6 +336,8 @@ def run(zos_system, spec: RunSpec, progress_cb=None, cancel_flag=None,
             time.sleep(poll_interval)
 
         ok = bool(tol.Succeeded)
+        result_lines = _tool_result_lines(tol)
+        emit(100 if ok else 0, "Zemax公差工具结果：\n" + "\n".join(result_lines))
         bw_folder = ""
         try:
             bw_folder = str(tol.BestWorstOutputFolder or "")
@@ -278,6 +354,9 @@ def run(zos_system, spec: RunSpec, progress_cb=None, cancel_flag=None,
             ztd_candidates = [expected_ztd]
             if spec.lens_dir:
                 ztd_candidates.append(os.path.join(spec.lens_dir, ztd_name))
+            zemax_tol_dir = _zemax_tolerance_dir(zos_system)
+            if zemax_tol_dir:
+                ztd_candidates.append(os.path.join(zemax_tol_dir, ztd_name))
             tol_dir = os.path.join(
                 os.path.expanduser("~"), "Documents", "Zemax", "Tolerance", ztd_name)
             ztd_candidates.append(tol_dir)
@@ -298,7 +377,8 @@ def run(zos_system, spec: RunSpec, progress_cb=None, cancel_flag=None,
                     ztd_found = True
                     break
 
-        msg = "" if ok else (str(tol.ErrorMessage) or "运行未成功")
+        zemax_status = "\n".join(result_lines)
+        msg = "" if ok else (_tool_error_message(tol) + f"\nZemax工具状态：\n{zemax_status}")
         if ok and spec.ztd_path and not ztd_found:
             ok = False
             searched = "\n".join(f"  - {p}" for p in ztd_candidates)
@@ -307,7 +387,8 @@ def run(zos_system, spec: RunSpec, progress_cb=None, cancel_flag=None,
                    f"已检查以下路径：\n{searched}\n"
                    "ZTD 只能由 Zemax 保存到当前工作副本所在目录；"
                    "请确认工作副本已 SaveAs 到目标输出目录、目录可写，"
-                   "且 OpticStudio 未弹出阻塞对话框。")
+                   "且 OpticStudio 未弹出阻塞对话框。\n"
+                   f"Zemax工具状态：\n{zemax_status}")
 
         emit(100, "完成" if ok else "失败")
         return RunResult(
