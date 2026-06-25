@@ -14,6 +14,7 @@ dist/
 
 # ---- 运行输出与中间产物 ----
 output/
+_backups/
 *.log
 
 # ---- Zemax 运行中间/结果文件 ----

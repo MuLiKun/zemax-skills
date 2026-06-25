@@ -9,10 +9,11 @@ agentstudy/
 ├── tolerance_analysis/        公差分析自动化程序（主项目）
 │   ├── gui.py                 图形界面入口（PySide6，暗色主题，推荐）
 │   ├── main.py / tol_run.py   命令行入口
+│   ├── check_stage1.py / make_backup.py  基础检查与本地备份脚本
 │   ├── toltool/               核心代码包（连接/建表/运行/读结果）
 │   ├── 方案A_全自动 / 方案B_手动观察
 │   ├── tol_config_*.xlsx      配置/模板
-│   └── 公差分析程序_使用说明.md / _需求文档.md
+│   └── 公差分析程序_使用说明.md / _需求文档.md / 开发进度与测试记录.md
 ├── .trae/skills/              Trae 技能（zemax-zosapi-connector / zemax-tolerance-analysis）
 └── .gitignore
 ```
@@ -43,6 +44,18 @@ agentstudy/
 ```powershell
 cd tolerance_analysis
 ..\.venv\Scripts\python.exe -u main.py
+```
+
+一阶段基础检查（不连接 Zemax，含典型负向配置校验）：
+
+```powershell
+..\.venv\Scripts\python.exe -u tolerance_analysis\check_stage1.py --python ..\.venv\Scripts\python.exe
+```
+
+本地备份快照（输出到 `_backups/`，不入库）：
+
+```powershell
+..\.venv\Scripts\python.exe -u tolerance_analysis\make_backup.py
 ```
 
 调用顺序：入口 → `pipeline`（依次 excel_io / zos_connect / tde_builder / mfe_builder / tsc_builder）→ `tol_runner` 跑蒙卡 →（tol_run.py 再调）`ztd_reader` 出统计。
