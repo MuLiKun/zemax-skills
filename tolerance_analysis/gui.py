@@ -189,6 +189,7 @@ class _Worker(QtCore.QObject):
     @QtCore.Slot()
     def run(self) -> None:
         sess = None
+        prep = None
         try:
             prep = pipeline.prepare_session(
                 self._zmx, self._config, outdir=self._outdir,
@@ -197,28 +198,35 @@ class _Worker(QtCore.QObject):
             sess = prep.sess
             self._sess = sess
 
+            def run_log(message: str) -> None:
+                pipeline.append_run_log(prep, message, log=self.log.emit)
+
             spec = pipeline.make_runspec(prep)
+            pipeline.log_run_plan(
+                prep, spec, log=run_log,
+                export_stats=_yes(prep.rp.get("输出统计Excel", "N")))
             self.started.emit(int(spec.num_runs), int(spec.num_to_save))
-            self.log.emit(
+            run_log(
                 f"开始公差分析：{spec.num_runs} 次蒙特卡洛"
                 f"（{spec.distribution}分布）…")
 
             from toltool import tol_runner
             result = tol_runner.run(
                 prep.sess.sys, spec,
-                progress_cb=lambda p, m: self.log.emit(f"  [{p:>3}%] {m}"),
+                progress_cb=lambda p, m: run_log(f"  [{p:>3}%] {m}"),
                 cancel_flag=lambda: self._cancel)
 
             if self._force:
                 self.finished.emit(False, "已强制停止（后台 Zemax 已关闭）")
                 return
             if not result.succeeded:
+                run_log("公差分析失败：" + (result.message or "未知错误"))
                 self.finished.emit(False, result.message or "公差分析失败")
                 return
 
-            self.log.emit(f"分析完成。ZTD: {result.ztd_path}")
+            run_log(f"分析完成。ZTD: {result.ztd_path}")
             if result.bestworst_folder:
-                self.log.emit(f"Worst/Best 输出目录: {result.bestworst_folder}")
+                run_log(f"Worst/Best 输出目录: {result.bestworst_folder}")
 
             if _yes(prep.rp.get("输出统计Excel", "N")):
                 from toltool import ztd_reader
@@ -227,29 +235,38 @@ class _Worker(QtCore.QObject):
                     if _yes(r.get("启用")) and r.get("标签")
                 ]
                 report_labels = [str(r.get("标签")).strip() for r in report_meta]
+                num_items = len(report_labels) + 1 if report_labels else None
+                if num_items:
+                    run_log(
+                        f"ZTD 自动统计分项: {num_items} 项（自定义脚本 + {len(report_labels)} 个 REPORT）")
                 num_runs = _as_int(prep.rp.get("蒙特卡洛次数"), int(spec.num_runs))
-                self.log.emit("正在读取 ZTD 并导出统计 Excel…")
+                run_log("正在读取 ZTD 并导出统计 Excel…")
                 zres = ztd_reader.read_ztd(
                     prep.sess.sys, result.ztd_path, num_runs=num_runs,
                     report_labels=report_labels or None,
+                    num_items=num_items,
                     report_meta=report_meta or None)
                 if not zres.succeeded:
+                    run_log("分析完成，但读取 ZTD 失败：" + zres.message)
                     self.finished.emit(False, "分析完成，但读取 ZTD 失败：" + zres.message)
                     return
                 if zres.message:
-                    self.log.emit("提示：" + zres.message)
+                    run_log("提示：" + zres.message)
                 stat_path = result.ztd_path.rsplit(".", 1)[0] + "_统计.xlsx"
                 out = ztd_reader.export_excel(zres, stat_path)
-                self.log.emit(f"统计 Excel: {out}")
+                run_log(f"统计 Excel: {out}")
 
             self.finished.emit(True, result.ztd_path)
         except zos_connect.ZosDirNotFound as e:
             self.need_zos_dir.emit(list(e.searched))
         except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            if prep is not None:
+                pipeline.append_run_log(prep, "任务异常：" + msg, log=lambda _m: None)
             if self._force:
                 self.finished.emit(False, "已强制停止（后台 Zemax 已关闭）")
             else:
-                self.finished.emit(False, f"{type(e).__name__}: {e}")
+                self.finished.emit(False, msg)
         finally:
             if sess is not None and not self._force \
                     and self._connect == "standalone":

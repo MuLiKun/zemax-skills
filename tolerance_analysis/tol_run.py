@@ -64,6 +64,28 @@ def _as_int(v, default: int) -> int:
         return default
 
 
+def _cmd_validate_only(args) -> int:
+    if not args.config:
+        print("错误：--validate-only 需要 --config 指定配置 Excel。", file=sys.stderr)
+        return 2
+    if not args.zmx:
+        print("错误：--validate-only 需要 --zmx 指定待分析镜头。", file=sys.stderr)
+        return 2
+
+    from toltool import pipeline
+
+    try:
+        cfg = pipeline.validate_config(args.zmx, args.config)
+    except Exception as e:
+        print(f"配置校验失败：{e}", file=sys.stderr)
+        return 1
+
+    print("配置校验通过。")
+    print(f"评价函数有效行数: {len([r for r in cfg.mfe if str(r.get('操作数') or '').strip()])}")
+    print(f"REPORT 启用行数: {len([r for r in cfg.report if _yes(r.get('启用'))])}")
+    return 0
+
+
 def _cmd_run(args) -> int:
     if not args.config:
         print("错误：运行需要 --config 指定配置 Excel。", file=sys.stderr)
@@ -77,34 +99,54 @@ def _cmd_run(args) -> int:
     prep = pipeline.prepare_session(
         args.zmx, args.config, outdir=args.outdir, connect=args.connect)
 
-    result = pipeline.run_montecarlo(prep)
+    export_stats = (not args.no_read) and _yes(prep.rp.get("输出统计Excel", "N"))
+    result = pipeline.run_montecarlo(
+        prep, log=lambda m: pipeline.append_run_log(prep, m),
+        export_stats=export_stats)
     if not result.succeeded:
+        pipeline.append_run_log(prep, "公差分析失败：" + (result.message or "未知错误"))
         print(f"公差分析失败: {result.message}", file=sys.stderr)
         return 1
-    print(f"分析完成。ZTD: {result.ztd_path}")
+    pipeline.append_run_log(prep, f"分析完成。ZTD: {result.ztd_path}")
     if result.bestworst_folder:
-        print(f"Worst/Best 输出目录: {result.bestworst_folder}")
+        pipeline.append_run_log(prep, f"Worst/Best 输出目录: {result.bestworst_folder}")
 
     if args.no_read:
         print("（--no-read：跳过 ZTD 读取，请在 OpticStudio 中查看结果）")
         return 0
 
-    report_meta = [
-        r for r in prep.cfg.report if _yes(r.get("启用")) and r.get("标签")
-    ]
-    report_labels = [str(r.get("标签")).strip() for r in report_meta]
-    num_runs = _as_int(prep.rp.get("蒙特卡洛次数"), 200)
-    zres = ztd_reader.read_ztd(
-        prep.sess.sys, result.ztd_path, num_runs=num_runs,
-        report_labels=report_labels or None,
-        report_meta=report_meta or None)
-    print()
-    print(ztd_reader.format_table(zres))
-    if zres.succeeded and _yes(prep.rp.get("输出统计Excel", "N")):
-        stat_path = result.ztd_path.rsplit(".", 1)[0] + "_统计.xlsx"
-        out = ztd_reader.export_excel(zres, stat_path)
-        print(f"统计 Excel: {out}")
-    return 0 if zres.succeeded else 1
+    try:
+        report_meta = [
+            r for r in prep.cfg.report if _yes(r.get("启用")) and r.get("标签")
+        ]
+        report_labels = [str(r.get("标签")).strip() for r in report_meta]
+        num_items = len(report_labels) + 1 if report_labels else None
+        if num_items:
+            pipeline.append_run_log(
+                prep, f"ZTD 自动统计分项: {num_items} 项（自定义脚本 + {len(report_labels)} 个 REPORT）")
+        num_runs = _as_int(prep.rp.get("蒙特卡洛次数"), 200)
+        zres = ztd_reader.read_ztd(
+            prep.sess.sys, result.ztd_path, num_runs=num_runs,
+            report_labels=report_labels or None,
+            num_items=num_items,
+            report_meta=report_meta or None)
+        print()
+        print(ztd_reader.format_table(zres))
+        if not zres.succeeded:
+            pipeline.append_run_log(prep, "分析完成，但读取 ZTD 失败：" + zres.message)
+            return 1
+        if zres.message:
+            pipeline.append_run_log(prep, "提示：" + zres.message)
+        if _yes(prep.rp.get("输出统计Excel", "N")):
+            stat_path = result.ztd_path.rsplit(".", 1)[0] + "_统计.xlsx"
+            out = ztd_reader.export_excel(zres, stat_path)
+            pipeline.append_run_log(prep, f"统计 Excel: {out}")
+        return 0
+    except Exception as e:
+        message = f"读取/导出 ZTD 失败：{type(e).__name__}: {e}"
+        pipeline.append_run_log(prep, message)
+        print(message, file=sys.stderr)
+        return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -120,6 +162,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="生成模板时覆盖已存在文件")
     p.add_argument("--read-only", action="store_true",
                    help="只读镜头信息，不跑分析")
+    p.add_argument("--validate-only", action="store_true",
+                   help="只校验 zmx 路径与 Excel 配置，不连接 Zemax、不跑分析")
     p.add_argument("--no-read", action="store_true",
                    help="跑完蒙特卡洛即停，不读取 ZTD（在 OpticStudio 中查看）")
     return p
@@ -131,6 +175,8 @@ def main(argv=None) -> int:
         return _cmd_init_template(args)
     if args.read_only:
         return _cmd_read_only(args)
+    if args.validate_only:
+        return _cmd_validate_only(args)
     return _cmd_run(args)
 
 

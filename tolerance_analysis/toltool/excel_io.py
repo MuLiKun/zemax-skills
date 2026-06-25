@@ -191,7 +191,7 @@ def generate_template(path: str, overwrite: bool = False) -> str:
         _write_table(ws_ex, header, ex, highlight=True)
         _apply_template_validations(ws_ex, name)
         ws_in = wb.create_sheet(f"输入_{name}")
-        prefill = ex if name in ("公差向导", "运行参数") else []
+        prefill = ex if name in ("公差向导", "评价函数", "REPORT", "运行参数") else []
         _write_table(ws_in, header, prefill, highlight=False)
         _apply_template_validations(ws_in, name)
 

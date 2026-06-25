@@ -10,8 +10,12 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import shutil
 from dataclasses import dataclass
+from datetime import datetime
 
 from . import (zos_connect, excel_io, tde_builder, mfe_builder,
                tsc_builder, tol_runner)
@@ -37,6 +41,134 @@ def _num(v, default=None):
         return default
 
 
+def _safe_name(name: str) -> str:
+    text = re.sub(r'[<>:"/\\|?*\s]+', "_", str(name).strip())
+    text = text.strip("._")
+    return text or "lens"
+
+
+def _make_run_dir(zmx: str, outdir: str | None) -> tuple[str, str]:
+    src_base = os.path.splitext(os.path.basename(zmx))[0]
+    parent = os.path.abspath(outdir) if outdir \
+        else os.path.dirname(os.path.abspath(zmx))
+    os.makedirs(parent, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(parent, f"公差分析_{_safe_name(src_base)}_{stamp}")
+    suffix = 1
+    unique_dir = run_dir
+    while os.path.exists(unique_dir):
+        suffix += 1
+        unique_dir = f"{run_dir}_{suffix}"
+    os.makedirs(unique_dir, exist_ok=False)
+    return parent, unique_dir
+
+
+def _json_default(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _write_json(path: str, data: dict) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
+
+
+def _log_to_file(path: str, message: str) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(str(message) + "\n")
+
+
+def _tee_logger(log, log_path: str):
+    def emit(message: str) -> None:
+        _log_to_file(log_path, message)
+        log(message)
+    return emit
+
+
+def append_run_log(prep, message: str, log=print) -> None:
+    if getattr(prep, "log_path", ""):
+        _log_to_file(prep.log_path, message)
+    log(message)
+
+
+def _validate_paths(zmx: str, config: str) -> None:
+    errors: list[str] = []
+    if not os.path.isfile(zmx):
+        errors.append(f"ZMX 文件不存在：{zmx}")
+    if not os.path.isfile(config):
+        errors.append(f"Excel 配置不存在：{config}")
+    if errors:
+        raise ValueError("运行前校验失败：\n" + "\n".join(f"- {e}" for e in errors))
+
+
+def _validate_inputs(cfg, rp: dict) -> None:
+    errors: list[str] = []
+    num_runs = _as_int(rp.get("蒙特卡洛次数"), 200)
+    num_to_save = _as_int(rp.get("保存数量"), 10)
+    if num_runs <= 0:
+        errors.append("蒙特卡洛次数必须大于 0")
+    if num_to_save < 0:
+        errors.append("保存数量不能小于 0")
+    if num_to_save > num_runs:
+        errors.append("保存数量不能大于蒙特卡洛次数")
+
+    valid_mfe_lines: set[int] = set()
+    for row in cfg.mfe:
+        op = str(row.get("操作数") or "").strip()
+        if not op:
+            continue
+        line = row.get("行号")
+        if line in (None, ""):
+            errors.append(f"评价函数操作数 {op} 缺少行号")
+            continue
+        try:
+            line_no = int(float(line))
+        except (TypeError, ValueError):
+            errors.append(f"评价函数行号无效：{line!r}")
+            continue
+        if line_no <= 0:
+            errors.append(f"评价函数行号必须大于 0：{line_no}")
+            continue
+        valid_mfe_lines.add(line_no)
+    if not valid_mfe_lines:
+        errors.append("评价函数工作表至少需要 1 行带操作数的有效行")
+
+    report_count = 0
+    for row in cfg.report:
+        if not _yes(row.get("启用")):
+            continue
+        label = str(row.get("标签") or "").strip()
+        mf_line = row.get("MF行号")
+        if not label:
+            errors.append("启用的 REPORT 行缺少标签")
+            continue
+        if mf_line in (None, ""):
+            errors.append(f"REPORT {label} 缺少 MF行号")
+            continue
+        try:
+            mf_line_no = int(float(mf_line))
+        except (TypeError, ValueError):
+            errors.append(f"REPORT {label} 的 MF行号无效：{mf_line!r}")
+            continue
+        if mf_line_no not in valid_mfe_lines:
+            errors.append(f"REPORT {label} 的 MF行号 {mf_line_no} 未在评价函数中找到")
+        report_count += 1
+    if report_count == 0:
+        errors.append("REPORT 至少需要启用 1 个带标签和 MF行号的分项")
+
+    if errors:
+        raise ValueError("运行前校验失败：\n" + "\n".join(f"- {e}" for e in errors))
+
+
+def validate_config(zmx: str, config: str):
+    """只校验文件路径和 Excel 配置，不连接 Zemax。"""
+    _validate_paths(zmx, config)
+    cfg = excel_io.read_config(config)
+    _validate_inputs(cfg, cfg.run_params)
+    return cfg
+
+
 @dataclass
 class Prepared:
     sess: object
@@ -50,6 +182,11 @@ class Prepared:
     n_mfe: int
     n_report: int
     lens_dir: str = ""
+    parent_outdir: str = ""
+    source_zmx: str = ""
+    config_path: str = ""
+    log_path: str = ""
+    run_config_path: str = ""
 
 
 def prepare_session(zmx: str, config: str, outdir: str | None = None,
@@ -59,8 +196,19 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
 
     两方案共用。返回 Prepared，方案A 据此跑蒙卡，方案B 据此提示用户。
     """
-    cfg = excel_io.read_config(config)
+    cfg = validate_config(zmx, config)
     rp = cfg.run_params
+
+    parent_out, out = _make_run_dir(zmx, outdir)
+    log_path = os.path.join(out, "run.log")
+    log = _tee_logger(log, log_path)
+    log(f"结果目录: {out}")
+    log(f"日志文件: {log_path}")
+    try:
+        shutil.copy2(config, os.path.join(out, "used_excel.xlsx"))
+    except Exception as e:
+        log(f"保存 Excel 配置快照失败(忽略): {e}")
+
     center_wave = _as_int(rp.get("中心波长号"), 0)
     comp_surface = _as_int(rp.get("后焦补偿面"), 0)
     comp_min = _num(rp.get("补偿Min"))
@@ -82,9 +230,6 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
         log(f"已连接交互扩展: {sess.sys.SystemFile}")
 
     src_base, src_ext = os.path.splitext(os.path.basename(zmx))
-    out = os.path.abspath(outdir) if outdir \
-        else os.path.dirname(os.path.abspath(zmx))
-    os.makedirs(out, exist_ok=True)
     copy_path = os.path.join(out, f"{src_base}_tol{src_ext}")
 
     copy = sess.open_as_copy(zmx, copy_path=copy_path)
@@ -136,10 +281,33 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
 
     sess.sys.Save()
 
+    run_config_path = os.path.join(out, "run_config.json")
+    _write_json(run_config_path, {
+        "source_zmx": os.path.abspath(zmx),
+        "config_excel": os.path.abspath(config),
+        "parent_outdir": parent_out,
+        "result_outdir": out,
+        "connect": connect,
+        "working_copy": os.path.abspath(copy),
+        "lens_dir": lens_dir,
+        "tsc_path": tsc_path,
+        "mf_path": mf_path,
+        "counts": {
+            "tde": n_tde,
+            "mfe": n_mfe,
+            "report": n_report,
+        },
+        "run_params": rp,
+    })
+    log(f"运行配置快照: {run_config_path}")
+
     return Prepared(sess=sess, cfg=cfg, rp=rp, base=base, outdir=out,
                     tsc_path=tsc_path, mf_path=mf_path,
                     n_tde=n_tde, n_mfe=n_mfe, n_report=n_report,
-                    lens_dir=lens_dir)
+                    lens_dir=lens_dir, parent_outdir=parent_out,
+                    source_zmx=os.path.abspath(zmx),
+                    config_path=os.path.abspath(config),
+                    log_path=log_path, run_config_path=run_config_path)
 
 
 def make_runspec(prep: Prepared) -> tol_runner.RunSpec:
@@ -161,9 +329,38 @@ def make_runspec(prep: Prepared) -> tol_runner.RunSpec:
     )
 
 
-def run_montecarlo(prep: Prepared, log=print):
+def log_run_plan(prep: Prepared, spec: tol_runner.RunSpec, log=print,
+                 export_stats: bool | None = None) -> None:
+    """打印本次运行的输出清单与保存策略。"""
+    save_worst = _yes(prep.rp.get("保存WorstCase", "Y"))
+    save_best = _yes(prep.rp.get("保存BestCase", "Y"))
+    used_excel = os.path.join(prep.outdir, "used_excel.xlsx")
+    stat_path = f"{os.path.splitext(spec.ztd_path)[0]}_统计.xlsx"
+    log("本次运行输出清单：")
+    log(f"  结果目录: {prep.outdir}")
+    log(f"  工作副本目录: {prep.lens_dir}")
+    log(f"  ZTD 目标文件: {spec.ztd_path}")
+    if export_stats is None:
+        log(f"  统计 Excel: {stat_path}（按运行参数决定是否生成）")
+    elif export_stats:
+        log(f"  统计 Excel: {stat_path}")
+    else:
+        log("  统计 Excel: 不生成")
+    log(f"  运行日志: {prep.log_path}")
+    log(f"  运行配置快照: {prep.run_config_path}")
+    log(f"  Excel 配置快照: {used_excel}")
+    log("本次保存策略：")
+    log(f"  蒙特卡洛次数: {spec.num_runs}")
+    log(f"  保存数量: {spec.num_to_save}")
+    log(f"  Worst/Best 保存: {'开启' if spec.save_best_worst else '关闭'}"
+        f"（Worst={'Y' if save_worst else 'N'}, Best={'Y' if save_best else 'N'}；Zemax API 为同一开关）")
+
+
+def run_montecarlo(prep: Prepared, log=print,
+                   export_stats: bool | None = None):
     """方案A：API 直接跑完蒙特卡洛。返回 RunResult。"""
     spec = make_runspec(prep)
+    log_run_plan(prep, spec, log=log, export_stats=export_stats)
     log(f"开始公差分析：{spec.num_runs} 次蒙特卡洛（{spec.distribution}分布）…")
 
     def on_progress(progress: int, msg: str) -> None:
