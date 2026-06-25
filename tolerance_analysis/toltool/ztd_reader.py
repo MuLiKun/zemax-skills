@@ -188,7 +188,7 @@ def _candidate_tsc_paths(ztd_path: str, zos_system=None) -> list[str]:
 
 
 def _read_text_with_fallback(path: str) -> str:
-    encodings = ["utf-8-sig", "utf-8", "mbcs", "latin-1"]
+    encodings = ["utf-16", "utf-8-sig", "utf-8", "mbcs", "latin-1"]
     last_err = None
     for encoding in encodings:
         try:
