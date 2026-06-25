@@ -103,7 +103,7 @@ def default_tsc_path(zos_system, base_name: str) -> str:
 
 
 def write_tsc(lines: list[str], tsc_path: str) -> str:
-    """写 TSC 文件。标签含非 ASCII 时给出提示但仍以 UTF-8 写。
+    """写 TSC 文件。
 
     目标文件可能被 OpticStudio 瞬时占用（刚 Save 同名镜头时），
     遇 PermissionError 短暂重试，仍失败则回退到带 _api 后缀的新文件名。
@@ -112,12 +112,8 @@ def write_tsc(lines: list[str], tsc_path: str) -> str:
     text = "\n".join(lines) + "\n"
 
     def _do_write(path: str) -> None:
-        try:
-            with open(path, "w", encoding="ascii") as f:
-                f.write(text)
-        except UnicodeEncodeError:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
+        with open(path, "w", encoding="utf-16") as f:
+            f.write(text)
 
     last_err = None
     for attempt in range(20):
