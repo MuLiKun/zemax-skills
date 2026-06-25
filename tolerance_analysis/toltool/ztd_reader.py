@@ -321,9 +321,32 @@ def read_ztd(zos_system, ztd_path: str, num_runs: int,
     try:
         dv.FileName = ztd_path
         ok = bool(dv.RunAndWaitForCompletion())
+        load_warning = ""
         if not ok or not dv.Succeeded:
-            return ZtdResult(False, ztd_path, num_runs, 0,
-                             message=str(dv.ErrorMessage) or "加载 ZTD 失败")
+            status = [
+                f"RunAndWaitForCompletion={ok}",
+                f"Succeeded={bool(dv.Succeeded)}",
+                f"ErrorMessage={str(dv.ErrorMessage) or '无'}",
+            ]
+            try:
+                values = dv.MonteCarloData.Values
+                rows = int(values.Rows)
+                cols = int(values.Cols)
+                status.append(f"MonteCarloData.Values.Rows={rows}")
+                status.append(f"MonteCarloData.Values.Cols={cols}")
+                if rows > 0 and cols > 0 and "Sensitivity" in str(dv.ErrorMessage):
+                    load_warning = (
+                        "ToleranceDataViewer 的 Sensitivity 数据解析失败，"
+                        "已降级仅读取 Monte Carlo 主矩阵；诊断：" + "；".join(status))
+                else:
+                    return ZtdResult(False, ztd_path, num_runs, 0,
+                                     message=(str(dv.ErrorMessage) or "加载 ZTD 失败")
+                                     + "；诊断：" + "；".join(status))
+            except Exception as probe_error:
+                status.append(f"MonteCarloData probe failed: {type(probe_error).__name__}: {probe_error}")
+                return ZtdResult(False, ztd_path, num_runs, 0,
+                                 message=(str(dv.ErrorMessage) or "加载 ZTD 失败")
+                                 + "；诊断：" + "；".join(status))
 
         summary = ""
         try:
@@ -417,6 +440,8 @@ def read_ztd(zos_system, ztd_path: str, num_runs: int,
             ))
 
         messages = []
+        if load_warning:
+            messages.append(load_warning)
         if row_limited:
             messages.append(
                 f"配置蒙特卡洛次数为 {num_runs}，ZTD 实际可读取 {actual_rows} 行。")

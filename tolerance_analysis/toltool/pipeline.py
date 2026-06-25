@@ -230,7 +230,10 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
         log(f"已连接交互扩展: {sess.sys.SystemFile}")
 
     src_base, src_ext = os.path.splitext(os.path.basename(zmx))
-    copy_path = os.path.join(out, f"{src_base}_tol{src_ext}")
+    safe_src_base = _safe_name(src_base)
+    if safe_src_base != src_base:
+        log(f"提示：镜头文件名包含空格或特殊字符，Zemax 输出前缀将使用安全名称: {safe_src_base}")
+    copy_path = os.path.join(out, f"{safe_src_base}_tol{src_ext}")
 
     copy = sess.open_as_copy(zmx, copy_path=copy_path)
     log(f"工作副本: {copy}")
