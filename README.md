@@ -9,9 +9,8 @@ agentstudy/
 ├── tolerance_analysis/        公差分析自动化程序（主项目）
 │   ├── gui.py                 图形界面入口（PySide6，暗色主题，推荐）
 │   ├── main.py / tol_run.py   命令行入口
-│   ├── check_stage1.py / check_field_mapping.py / make_backup.py
-│   │                           基础检查、视场映射检查与本地备份脚本
-│   ├── toltool/               核心代码包（连接/建表/运行/读结果/视场映射）
+│   ├── check_stage1.py / check_field_mapping.py / make_backup.py  基础检查、视场映射检查与本地备份脚本
+│   ├── toltool/               核心代码包（连接/建表/视场映射/运行/读结果）
 │   ├── 方案A_全自动 / 方案B_手动观察
 │   ├── tol_config_*.xlsx      配置/模板
 │   └── 公差分析程序_使用说明.md / _需求文档.md / 开发进度与测试记录.md
@@ -26,8 +25,7 @@ agentstudy/
 - 连接 OpticStudio（交互扩展 / 独立实例）
 - 按 Excel 配置自动写公差表（TDE）、评价函数（MFE）、生成 TSC 脚本
 - 支持运行前配置校验，不连接 Zemax 即可检查路径、Excel 与 MFE/REPORT 映射
-- 高级 Excel 模式支持视场号 ↔ 归一化视场映射：可读取 zmx 视场、按目标归一化视场匹配 Zemax 视场号，必要时仅向 tol 工作副本插入缺失视场，并统一 MFE/REPORT 标签。
-- 视场映射默认关闭；启用后若缺失视场且未允许自动插入，会停止运行，避免使用错误视场号继续分析。
+- 支持高级 Excel 视场映射：按目标归一化视场匹配/插入 tol 工作副本视场，自动改写 RSCE、GENC/GMTT/GMTS/GMTA 和 REPORT 标签，并输出 `mapped_excel.xlsx` 复核快照
 - 跑脚本式蒙特卡洛公差分析，在每次运行的时间戳结果目录内保存工作副本、ZTD、日志与配置快照
 - 读取 ZTD，把点列 / GENC / 几何 MTF 等各 REPORT 分项独立成列做统计，并导出统计 Excel；Cpk1.33 上下限双边输出，按方向标黄用户关注侧
 - 支持独立分析已有 ZTD；表头优先从同名 TSC 的 `REPORT "标签" 行号` 反推
@@ -71,8 +69,9 @@ cd tolerance_analysis
 ## 变更履历
 
 > 仅记录功能层面的主要变更，便于追溯。日期格式 YYYY-MM-DD。
-- **2026-06-26** 第一阶段完成并冻结：高级 Excel 主链路、GUI/CLI 回归、运行产物追踪、空格文件名兼容、Sensitivity 解析失败降级读取等一阶段能力已完成，进入内部试用版可交付状态。
-- **2026-06-26** 新增高级 Excel 视场映射：支持按归一化视场匹配 Zemax 视场号，默认目标为 `0,-0.25,0.25,-0.5,0.5,-0.7,0.7,-0.9,0.9,-1,1`；可选自动插入缺失视场到 tol 工作副本，并在 run.log / run_config.json 记录原始视场、插入视场和最终映射。
+
+- **2026-06-26** 高级 Excel 视场映射增强：目标归一化视场列改为可选覆盖项；空值时从 RSCE `Param4` 或 GENC/GMTT/GMTS/GMTA 原 `Param3` 自动推断；启用后输出 `mapped_excel.xlsx`，GUI/run.log 打印最终映射表和 MFE/REPORT 改写数量。
+- **2026-06-26** 第一阶段完成并冻结：完成多样本 GUI 端到端回归、工作副本隔离、运行产物追溯、ZTD 统计和 Stage 1.5 视场映射接入。
 - **2026-06-25** 运行产物隔离与追踪增强：每次运行进入时间戳结果目录，保存 `run.log`、`run_config.json`、`used_excel.xlsx`，并在日志中打印输出清单与保存策略。
 - **2026-06-23** GUI 与统计可用性增强：GUI 记住上次文件/目录/连接模式；统计 Excel 的 Cpk1.33 上下限双边输出，并按方向标黄用户关注侧。
 - **2026-06-23** 公差运行诊断增强：GUI 日志会输出 Zemax 公差工具关键设置与运行结果，失败时附带 `Succeeded`、`ErrorMessage`、`NumberToSave`、`SaveTolDataFile`、`TolDataFile` 等状态，并补充 Zemax 数据目录下 `Tolerance` 的 ZTD 查找路径。
