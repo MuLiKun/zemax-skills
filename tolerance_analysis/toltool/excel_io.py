@@ -57,16 +57,17 @@ _TOL_DETAIL_EX = [
 _MFE_HDR = ["行号", "操作数",
             "Param1", "Param2", "Param3", "Param4",
             "Param5", "Param6", "Param7", "Param8",
-            "目标", "权重", "归一化视场", "注释"]
+            "目标", "权重", "注释", "目标归一化视场", "视场映射说明"]
 _MFE_EX = [
-    [2, "RSCE", 3, 2, 0, 0.0, "", "", "", "", 0, 1, 0.0, "点列 F0 (P1采样 P2波长 P4归一化视场)"],
-    [3, "RSCE", 3, 2, 0, 0.5, "", "", "", "", 0, 1, 0.5, "点列 F0.5"],
-    [4, "RSCE", 3, 2, 0, 0.9, "", "", "", "", 0, 1, 0.9, "点列 F0.9"],
-    [5, "GENC", 3, 2, 1, 0.95, 1, 0, 0, "", 0, 1, 0.0, "GENC95 F0 (P3由视场映射改写为视场号)"],
-    [6, "GENC", 3, 2, 5, 0.95, 1, 0, 0, "", 0, 1, 0.5, "GENC95 F0.5"],
-    [7, "GENC", 3, 2, 8, 0.95, 1, 0, 0, "", 0, 1, 0.9, "GENC95 F0.9"],
-    [8, "GMTT", 3, 2, 1, 34, 0, 0, "", "", 0, 1, 0.0, "几何MTF子午 F0 (P3由视场映射改写为视场号)"],
-    [9, "GMTS", 3, 2, 1, 34, 0, 0, "", "", 0, 1, 0.0, "几何MTF弧矢 F0"],
+    [2, "RSCE", 3, 2, 0, 0.0, "", "", "", "", 0, 1, "点列 F0；RSCE 的 Param4 即归一化视场", "", "空则从 Param4 推断"],
+    [3, "RSCE", 3, 2, 0, 0.5, "", "", "", "", 0, 1, "点列 F0.5", "", "空则从 Param4 推断"],
+    [4, "RSCE", 3, 2, 0, 0.9, "", "", "", "", 0, 1, "点列 F0.9", "", "空则从 Param4 推断"],
+    [5, "GENC", 3, 2, 1, 0.95, 1, 0, 0, "", 0, 1, "GENC95；Param3 可直接从 Zemax MF 复制", "", "空则从 Param3 原视场号推断"],
+    [6, "GENC", 3, 2, 5, 0.95, 1, 0, 0, "", 0, 1, "GENC95；示例从原视场号推断", "", "专家可填 0.7/0.9 等覆盖"],
+    [7, "GENC", 3, 2, 7, 0.95, 1, 0, 0, "", 0, 1, "GENC95；示例从原视场号推断", "", "映射后实际 Param3 写入 mapped_excel.xlsx"],
+    [8, "GMTT", 3, 2, 1, 34, 0, 0, "", "", 0, 1, "几何MTF子午；Param3 可从 Zemax MF 复制", "", "空则从 Param3 原视场号推断"],
+    [9, "GMTS", 3, 2, 1, 34, 0, 0, "", "", 0, 1, "几何MTF弧矢；Param3 可从 Zemax MF 复制", "", "空则从 Param3 原视场号推断"],
+    [10, "GMTA", 3, 2, 1, 34, 0, 0, "", "", 0, 1, "几何MTF平均；Param3 可从 Zemax MF 复制", "", "空则从 Param3 原视场号推断"],
 ]
 
 _REPORT_HDR = ["启用", "标签", "MF行号", "方向", "单位"]
@@ -96,10 +97,11 @@ _RUN_EX = [
     ["保存BestCase", "Y", "保存最佳案例文件"],
     ["输出统计Excel", "Y", "Y=导出ZTD统计Excel，含百分位与Cpk1.33规格限"],
     ["输出直方图", "N", "本期预留，默认关"],
-    ["启用视场映射", "N", "Y=按归一化视场匹配/改写 GENC/GMTT/GMTS 视场号，默认关"],
+    ["启用视场映射", "N", "Y=启用后台视场映射；默认关"],
     ["视场插入策略", "禁用", "禁用/自动插入；自动插入只修改 tol 工作副本"],
     ["视场匹配阈值", 0.05, "目标归一化视场与最近已有视场差值大于该值时视为缺失"],
-    ["目标归一化视场", "0,-0.25,0.25,-0.5,0.5,-0.7,0.7,-0.9,0.9,-1,1", "用于视场号映射和 REPORT 标签"],
+    ["目标归一化视场", "0,-0.25,0.25,-0.5,0.5,-0.7,0.7,-0.9,0.9,-1,1", "标准目标视场序列；后台推断时吸附到最近目标"],
+    ["目标视场来源策略", "自动推断", "自动推断=优先目标列，空则从RSCE Param4/其他操作数Param3推断；仅显式=只用目标列，不自动反推"],
 ]
 
 _INTRO_LINES = [
@@ -241,13 +243,24 @@ def _read_tol_detail_rows(ws: Worksheet) -> list[dict]:
 
 def _read_mfe_rows(ws: Worksheet) -> list[dict]:
     actual = [str(ws.cell(row=1, column=i).value or "").strip()
-              for i in range(1, len(_MFE_HDR) + 1)]
-    if "归一化视场" in actual:
-        return _read_sheet_rows(ws, _MFE_HDR)
-    legacy_hdr = [h for h in _MFE_HDR if h != "归一化视场"]
-    rows = _read_sheet_rows(ws, legacy_hdr)
-    for row in rows:
-        row.setdefault("归一化视场", None)
+              for i in range(1, ws.max_column + 1)]
+    rows: list[dict] = []
+    for values in ws.iter_rows(min_row=2, values_only=True):
+        if values is None or all(v is None or v == "" for v in values):
+            continue
+        first = values[0]
+        if isinstance(first, str) and first.strip().startswith("#"):
+            continue
+        row = {actual[i]: values[i] if i < len(values) else None
+               for i in range(len(actual)) if actual[i]}
+        row.setdefault("目标归一化视场", row.get("归一化视场"))
+        row.setdefault("归一化视场", row.get("目标归一化视场"))
+        row.setdefault("视场映射说明", None)
+        # 持久列以 _MFE_HDR 为准（含“目标归一化视场”）；
+        # “归一化视场”仅作运行期内存兼容键，不写回 Excel（见 write_mapped_config）。
+        rows.append({h: row.get(h) for h in _MFE_HDR} | {
+            "归一化视场": row.get("归一化视场"),
+        })
     return rows
 
 
@@ -270,3 +283,21 @@ def read_config(path: str) -> Config:
         if key:
             cfg.run_params[str(key).strip()] = row.get("值")
     return cfg
+
+
+def _rewrite_sheet(ws: Worksheet, header: list[str], rows: list[dict]) -> None:
+    ws.delete_rows(1, ws.max_row)
+    _write_table(ws, header, [[row.get(h) for h in header] for row in rows], highlight=False)
+
+
+def write_mapped_config(source_path: str, target_path: str, cfg: Config) -> str:
+    # 注：此处 load_workbook 不带 data_only=True，保留源文件公式以维持快照可读性；
+    # read_config 用 data_only=True 读取计算值。若源含公式，二者展示值可能不同，
+    # 但本快照仅供人工核对映射结果，不参与计算，差异可接受。
+    wb = load_workbook(source_path)
+    if "输入_评价函数" in wb.sheetnames:
+        _rewrite_sheet(wb["输入_评价函数"], _MFE_HDR, cfg.mfe)
+    if "输入_REPORT" in wb.sheetnames:
+        _rewrite_sheet(wb["输入_REPORT"], _REPORT_HDR, cfg.report)
+    wb.save(target_path)
+    return target_path
