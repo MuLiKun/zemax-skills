@@ -57,16 +57,16 @@ _TOL_DETAIL_EX = [
 _MFE_HDR = ["行号", "操作数",
             "Param1", "Param2", "Param3", "Param4",
             "Param5", "Param6", "Param7", "Param8",
-            "目标", "权重", "注释"]
+            "目标", "权重", "归一化视场", "注释"]
 _MFE_EX = [
-    [2, "RSCE", 3, 2, 0, 0.0, "", "", "", "", 0, 1, "点列 Hy0.0 (P1采样 P2波长 P4视场)"],
-    [3, "RSCE", 3, 2, 0, 0.5, "", "", "", "", 0, 1, "点列 Hy0.5"],
-    [4, "RSCE", 3, 2, 0, 0.9, "", "", "", "", 0, 1, "点列 Hy0.9"],
-    [5, "GENC", 3, 2, 1, 0.95, 1, 0, 0, "", 0, 1, "GENC95 F1 (P3视场号 P4能量比)"],
-    [6, "GENC", 3, 2, 5, 0.95, 1, 0, 0, "", 0, 1, "GENC95 F5"],
-    [7, "GENC", 3, 2, 8, 0.95, 1, 0, 0, "", 0, 1, "GENC95 F8"],
-    [8, "GMTT", 3, 2, 1, 34, 0, 0, "", "", 0, 1, "几何MTF子午 F1 (P3视场号 P4频率lp/mm)"],
-    [9, "GMTS", 3, 2, 1, 34, 0, 0, "", "", 0, 1, "几何MTF弧矢 F1"],
+    [2, "RSCE", 3, 2, 0, 0.0, "", "", "", "", 0, 1, 0.0, "点列 F0 (P1采样 P2波长 P4归一化视场)"],
+    [3, "RSCE", 3, 2, 0, 0.5, "", "", "", "", 0, 1, 0.5, "点列 F0.5"],
+    [4, "RSCE", 3, 2, 0, 0.9, "", "", "", "", 0, 1, 0.9, "点列 F0.9"],
+    [5, "GENC", 3, 2, 1, 0.95, 1, 0, 0, "", 0, 1, 0.0, "GENC95 F0 (P3由视场映射改写为视场号)"],
+    [6, "GENC", 3, 2, 5, 0.95, 1, 0, 0, "", 0, 1, 0.5, "GENC95 F0.5"],
+    [7, "GENC", 3, 2, 8, 0.95, 1, 0, 0, "", 0, 1, 0.9, "GENC95 F0.9"],
+    [8, "GMTT", 3, 2, 1, 34, 0, 0, "", "", 0, 1, 0.0, "几何MTF子午 F0 (P3由视场映射改写为视场号)"],
+    [9, "GMTS", 3, 2, 1, 34, 0, 0, "", "", 0, 1, 0.0, "几何MTF弧矢 F0"],
 ]
 
 _REPORT_HDR = ["启用", "标签", "MF行号", "方向", "单位"]
@@ -96,6 +96,10 @@ _RUN_EX = [
     ["保存BestCase", "Y", "保存最佳案例文件"],
     ["输出统计Excel", "Y", "Y=导出ZTD统计Excel，含百分位与Cpk1.33规格限"],
     ["输出直方图", "N", "本期预留，默认关"],
+    ["启用视场映射", "N", "Y=按归一化视场匹配/改写 GENC/GMTT/GMTS 视场号，默认关"],
+    ["视场插入策略", "禁用", "禁用/自动插入；自动插入只修改 tol 工作副本"],
+    ["视场匹配阈值", 0.05, "目标归一化视场与最近已有视场差值大于该值时视为缺失"],
+    ["目标归一化视场", "0,-0.25,0.25,-0.5,0.5,-0.7,0.7,-0.9,0.9,-1,1", "用于视场号映射和 REPORT 标签"],
 ]
 
 _INTRO_LINES = [
@@ -235,6 +239,18 @@ def _read_tol_detail_rows(ws: Worksheet) -> list[dict]:
     return rows
 
 
+def _read_mfe_rows(ws: Worksheet) -> list[dict]:
+    actual = [str(ws.cell(row=1, column=i).value or "").strip()
+              for i in range(1, len(_MFE_HDR) + 1)]
+    if "归一化视场" in actual:
+        return _read_sheet_rows(ws, _MFE_HDR)
+    legacy_hdr = [h for h in _MFE_HDR if h != "归一化视场"]
+    rows = _read_sheet_rows(ws, legacy_hdr)
+    for row in rows:
+        row.setdefault("归一化视场", None)
+    return rows
+
+
 def read_config(path: str) -> Config:
     wb = load_workbook(path, data_only=True)
     cfg = Config()
@@ -247,7 +263,7 @@ def read_config(path: str) -> Config:
 
     cfg.tol_wizard = _read_sheet_rows(sheet("公差向导"), _TOL_WIZARD_HDR)
     cfg.tol_detail = _read_tol_detail_rows(sheet("公差明细"))
-    cfg.mfe = _read_sheet_rows(sheet("评价函数"), _MFE_HDR)
+    cfg.mfe = _read_mfe_rows(sheet("评价函数"))
     cfg.report = _read_sheet_rows(sheet("REPORT"), _REPORT_HDR)
     for row in _read_sheet_rows(sheet("运行参数"), _RUN_HDR):
         key = row.get("参数键")
