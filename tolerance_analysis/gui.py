@@ -25,6 +25,7 @@ if _HERE not in sys.path:
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from toltool import pipeline
+from toltool import standard_templates
 from toltool import zos_connect
 
 
@@ -161,12 +162,13 @@ class _Worker(QtCore.QObject):
     need_zos_dir = QtCore.Signal(list)
 
     def __init__(self, zmx: str, config: str, outdir: str, connect: str,
-                 zos_dir: str | None = None):
+                 standard_args: dict | None = None, zos_dir: str | None = None):
         super().__init__()
         self._zmx = zmx
         self._config = config
         self._outdir = outdir
         self._connect = connect
+        self._standard_args = standard_args or {}
         self._zos_dir = zos_dir
         self._cancel = False
         self._force = False
@@ -191,8 +193,21 @@ class _Worker(QtCore.QObject):
         sess = None
         prep = None
         try:
+            config = self._config
+            if self._standard_args:
+                config = standard_templates.make_temp_config(
+                    self._zmx, self._outdir,
+                    self._standard_args["template"],
+                    self._standard_args["level"],
+                    self._standard_args["num_runs"],
+                    self._standard_args["num_to_save"],
+                    self._standard_args["center_wave"],
+                    self._standard_args["comp_mode"],
+                    self._standard_args["save_worst_best"])
+                self.log.emit(f"标准模板配置: {config}")
+
             prep = pipeline.prepare_session(
-                self._zmx, self._config, outdir=self._outdir,
+                self._zmx, config, outdir=self._outdir,
                 connect=self._connect, log=self.log.emit,
                 zos_dir=self._zos_dir)
             sess = prep.sess
@@ -391,12 +406,63 @@ class MainWindow(QtWidgets.QMainWindow):
             self._setting("outdir", DEFAULT_OUTDIR))
         self._add_file_row(form, 0, "待分析 zmx：", self.ed_zmx,
                            self._pick_zmx)
-        self._add_file_row(form, 1, "Excel 配置：", self.ed_config,
-                           self._pick_config)
+        self.btn_pick_config = self._add_file_row(form, 1, "Excel 配置：", self.ed_config,
+                                                  self._pick_config)
         self._add_file_row(form, 2, "输出目录：", self.ed_outdir,
                            self._pick_outdir)
 
-        form.addWidget(QtWidgets.QLabel("连接模式："), 3, 0)
+        form.addWidget(QtWidgets.QLabel("分析模式："), 3, 0)
+        self.cb_analysis_mode = QtWidgets.QComboBox()
+        self.cb_analysis_mode.addItem("高级 Excel 配置", "excel")
+        self.cb_analysis_mode.addItem("普通标准模板", "standard")
+        mode = self.cb_analysis_mode.findData(self._setting("analysis_mode", "excel"))
+        if mode >= 0:
+            self.cb_analysis_mode.setCurrentIndex(mode)
+        self.cb_analysis_mode.currentIndexChanged.connect(self._on_analysis_mode_changed)
+        form.addWidget(self.cb_analysis_mode, 3, 1, 1, 2)
+
+        self.standard_panel = QtWidgets.QWidget()
+        std = QtWidgets.QHBoxLayout(self.standard_panel)
+        std.setContentsMargins(0, 0, 0, 0)
+        std.setSpacing(6)
+        self.cb_std_template = QtWidgets.QComboBox()
+        self.cb_std_template.addItems(standard_templates.TEMPLATE_NAMES)
+        idx = self.cb_std_template.findText(self._setting("standard_template", "快速摸底"))
+        if idx >= 0:
+            self.cb_std_template.setCurrentIndex(idx)
+        self.cb_tol_level = QtWidgets.QComboBox()
+        self.cb_tol_level.addItems(standard_templates.LEVEL_NAMES)
+        idx = self.cb_tol_level.findText(self._setting("tolerance_level", "标准"))
+        if idx >= 0:
+            self.cb_tol_level.setCurrentIndex(idx)
+        self.sp_runs = QtWidgets.QSpinBox()
+        self.sp_runs.setRange(1, 100000)
+        self.sp_runs.setValue(int(self._setting("standard_runs", "20")))
+        self.sp_save = QtWidgets.QSpinBox()
+        self.sp_save.setRange(0, 100000)
+        self.sp_save.setValue(int(self._setting("standard_save", "0")))
+        self.cb_comp = QtWidgets.QComboBox()
+        self.cb_comp.addItems(["无", "全部优化DLS", "全部优化OD"])
+        idx = self.cb_comp.findText(self._setting("standard_comp", "无"))
+        if idx >= 0:
+            self.cb_comp.setCurrentIndex(idx)
+        self.chk_save_worst_best = QtWidgets.QCheckBox("保存 WC/BC")
+        self.chk_save_worst_best.setChecked(_yes(self._setting("standard_save_worst_best", "N")))
+        std.addWidget(QtWidgets.QLabel("模板"))
+        std.addWidget(self.cb_std_template, 2)
+        std.addWidget(QtWidgets.QLabel("等级"))
+        std.addWidget(self.cb_tol_level)
+        std.addWidget(QtWidgets.QLabel("MC"))
+        std.addWidget(self.sp_runs)
+        std.addWidget(QtWidgets.QLabel("保存"))
+        std.addWidget(self.sp_save)
+        std.addWidget(QtWidgets.QLabel("补偿"))
+        std.addWidget(self.cb_comp)
+        std.addWidget(self.chk_save_worst_best)
+        form.addWidget(QtWidgets.QLabel("标准模板："), 4, 0)
+        form.addWidget(self.standard_panel, 4, 1, 1, 2)
+
+        form.addWidget(QtWidgets.QLabel("连接模式："), 5, 0)
         self.cb_mode = QtWidgets.QComboBox()
         self.cb_mode.addItem("Standalone（程序后台挂起，推荐）", "standalone")
         self.cb_mode.addItem("GUI 模式（连入交互扩展窗口）", "extension")
@@ -406,10 +472,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_mode.currentIndexChanged.connect(
             lambda: self._settings.setValue(
                 "connect", self.cb_mode.currentData()))
-        form.addWidget(self.cb_mode, 3, 1, 1, 2)
+        form.addWidget(self.cb_mode, 5, 1, 1, 2)
 
         self.ed_ztd = QtWidgets.QLineEdit(self._setting("ztd", ""))
-        self._add_file_row(form, 4, "已有 ZTD：", self.ed_ztd,
+        self._add_file_row(form, 6, "已有 ZTD：", self.ed_ztd,
                            self._pick_ztd)
 
         ztdbar = QtWidgets.QHBoxLayout()
@@ -421,15 +487,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         btns = QtWidgets.QHBoxLayout()
         btns.addStretch(1)
+        self.btn_export_std = QtWidgets.QPushButton("导出标准配置")
+        self.btn_export_std.clicked.connect(self._on_export_standard_config)
         self.btn_run = QtWidgets.QPushButton("开始分析")
         self.btn_run.setObjectName("run")
         self.btn_run.clicked.connect(self._on_run)
         self.btn_cancel = QtWidgets.QPushButton("取消")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
+        btns.addWidget(self.btn_export_std)
         btns.addWidget(self.btn_cancel)
         btns.addWidget(self.btn_run)
         root.addLayout(btns)
+        self._on_analysis_mode_changed()
 
         hint = QtWidgets.QLabel(
             "提示：GUI 模式需先在 OpticStudio 进入「编程 → 交互扩展」并等待。")
@@ -472,6 +542,7 @@ class MainWindow(QtWidgets.QMainWindow):
         btn = QtWidgets.QPushButton("浏览…")
         btn.clicked.connect(slot)
         grid.addWidget(btn, row, 2)
+        return btn
 
     def _setting(self, key: str, default: str = "") -> str:
         return str(self._settings.value(key, default) or "")
@@ -508,6 +579,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self._remember_path("outdir", self.ed_outdir.text().strip())
         self._remember_path("ztd", self.ed_ztd.text().strip())
         self._settings.setValue("connect", self.cb_mode.currentData())
+        self._settings.setValue("analysis_mode", self.cb_analysis_mode.currentData())
+        self._settings.setValue("standard_template", self.cb_std_template.currentText())
+        self._settings.setValue("tolerance_level", self.cb_tol_level.currentText())
+        self._settings.setValue("standard_runs", self.sp_runs.value())
+        self._settings.setValue("standard_save", self.sp_save.value())
+        self._settings.setValue("standard_comp", self.cb_comp.currentText())
+
+    def _on_analysis_mode_changed(self):
+        use_standard = self.cb_analysis_mode.currentData() == "standard"
+        self.ed_config.setEnabled(not use_standard)
+        if hasattr(self, "btn_pick_config"):
+            self.btn_pick_config.setEnabled(not use_standard)
+        if hasattr(self, "btn_export_std"):
+            self.btn_export_std.setEnabled(use_standard)
+        self.standard_panel.setEnabled(use_standard)
+        self._settings.setValue("analysis_mode", self.cb_analysis_mode.currentData())
 
     def _pick_zmx(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -544,32 +631,99 @@ class MainWindow(QtWidgets.QMainWindow):
     def _append_log(self, text: str):
         self.log_view.appendPlainText(text)
 
+    def _standard_args_from_ui(self) -> dict:
+        return {
+            "template": self.cb_std_template.currentText(),
+            "level": self.cb_tol_level.currentText(),
+            "num_runs": self.sp_runs.value(),
+            "num_to_save": self.sp_save.value(),
+            "center_wave": 0,
+            "comp_mode": self.cb_comp.currentText(),
+            "save_worst_best": self.chk_save_worst_best.isChecked(),
+        }
+
+    def _on_export_standard_config(self):
+        if self.cb_analysis_mode.currentData() != "standard":
+            self._warn("请先将分析模式切换为“普通标准模板”。")
+            return
+        zmx = self.ed_zmx.text().strip()
+        outdir = self.ed_outdir.text().strip()
+        if not os.path.isfile(zmx):
+            self._warn("zmx 文件不存在：\n" + zmx)
+            return
+        if self.sp_save.value() > self.sp_runs.value():
+            self._warn("标准模板模式下，保存数量不能大于 MC 次数。")
+            return
+        if not outdir:
+            outdir = os.path.join(_HERE, "output")
+            self.ed_outdir.setText(outdir)
+        os.makedirs(outdir, exist_ok=True)
+        args = self._standard_args_from_ui()
+        default_path = standard_templates.default_config_path(zmx, outdir)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "导出标准配置", default_path,
+            "Excel (*.xlsx);;所有文件 (*.*)")
+        if not path:
+            return
+        if os.path.splitext(path)[1].lower() != ".xlsx":
+            path += ".xlsx"
+        try:
+            cfg = standard_templates.build_config(
+                zmx, template=args["template"], level=args["level"],
+                num_runs=args["num_runs"], num_to_save=args["num_to_save"],
+                center_wave=args["center_wave"], comp_mode=args["comp_mode"],
+                save_worst_best=args["save_worst_best"])
+            standard_templates.write_config_excel(path, cfg, overwrite=True)
+        except Exception as e:
+            self._warn("导出标准配置失败：\n" + str(e))
+            return
+        self.ed_config.setText(path)
+        self._remember_path("config", path)
+        self._remember_form_paths()
+        self._append_log(f"已导出标准配置: {path}")
+        self.statusBar().showMessage("标准配置已导出", 3000)
+
     def _on_run(self):
         zmx = self.ed_zmx.text().strip()
         config = self.ed_config.text().strip()
         outdir = self.ed_outdir.text().strip()
         connect = self.cb_mode.currentData()
+        use_standard = self.cb_analysis_mode.currentData() == "standard"
 
         if not os.path.isfile(zmx):
             self._warn("zmx 文件不存在：\n" + zmx)
             return
-        if not os.path.isfile(config):
+        if not use_standard and not os.path.isfile(config):
             self._warn("Excel 配置不存在：\n" + config)
             return
         if not outdir:
             outdir = os.path.join(_HERE, "output")
         os.makedirs(outdir, exist_ok=True)
         self.ed_outdir.setText(outdir)
+        if use_standard and self.sp_save.value() > self.sp_runs.value():
+            self._warn("标准模板模式下，保存数量不能大于 MC 次数。")
+            return
         self._remember_form_paths()
+
+        standard_args = self._standard_args_from_ui() if use_standard else None
 
         self.log_view.clear()
         self._append_log(
             f"连接模式: {'Standalone' if connect == 'standalone' else 'GUI(交互扩展)'}")
         self._append_log(f"待分析镜头: {zmx}")
-        self._append_log(f"配置 Excel: {config}")
+        if use_standard:
+            self._append_log("分析模式: 普通标准模板")
+            self._append_log(
+                f"模板={standard_args['template']} 等级={standard_args['level']} "
+                f"MC={standard_args['num_runs']} 保存={standard_args['num_to_save']} "
+                f"补偿={standard_args['comp_mode']} "
+                f"保存WC/BC={'Y' if standard_args['save_worst_best'] else 'N'}")
+        else:
+            self._append_log("分析模式: 高级 Excel 配置")
+            self._append_log(f"配置 Excel: {config}")
         self._append_log(f"输出目录: {outdir}")
 
-        self._run_args = (zmx, config, outdir, connect)
+        self._run_args = (zmx, config, outdir, connect, standard_args)
         self._active_task = "tol"
         self._start_worker(None)
 
@@ -607,7 +761,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._run_args:
             self._warn("尚未设置运行参数，请先点击「开始分析」。")
             return
-        zmx, config, outdir, connect = self._run_args
+        zmx, config, outdir, connect, standard_args = self._run_args
         self._set_running(True)
         self._num_runs = 0
         self._num_to_save = 0
@@ -616,7 +770,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_runinfo.setText("")
         self._timer.start()
         self._thread = QtCore.QThread(self)
-        self._worker = _Worker(zmx, config, outdir, connect, zos_dir=zos_dir)
+        self._worker = _Worker(
+            zmx, config, outdir, connect,
+            standard_args=standard_args, zos_dir=zos_dir)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.log.connect(self._append_log)
@@ -771,10 +927,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_running(self, running: bool):
         self.btn_run.setEnabled(not running)
         self.btn_ztd.setEnabled(not running)
+        self.btn_export_std.setEnabled(not running and self.cb_analysis_mode.currentData() == "standard")
         self.btn_cancel.setEnabled(running and self._active_task == "tol")
         for w in (self.ed_zmx, self.ed_config, self.ed_outdir,
-                  self.ed_ztd, self.cb_mode):
+                  self.ed_ztd, self.cb_mode, self.cb_analysis_mode,
+                  self.standard_panel):
             w.setEnabled(not running)
+        if not running:
+            self._on_analysis_mode_changed()
         if running:
             msg = "ZTD 分析中…" if self._active_task == "ztd" else "公差分析运行中…"
         else:

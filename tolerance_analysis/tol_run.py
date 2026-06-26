@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from toltool import excel_io
+from toltool import excel_io, standard_templates
 
 
 def _cmd_init_template(args) -> int:
@@ -64,40 +64,53 @@ def _as_int(v, default: int) -> int:
         return default
 
 
+def _standard_config_path(args) -> str:
+    return standard_templates.make_temp_config(
+        args.zmx, args.outdir, args.standard_template, args.tolerance_level,
+        args.num_runs, args.num_to_save, args.center_wave, args.comp_mode)
+
+
 def _cmd_validate_only(args) -> int:
-    if not args.config:
-        print("错误：--validate-only 需要 --config 指定配置 Excel。", file=sys.stderr)
-        return 2
     if not args.zmx:
         print("错误：--validate-only 需要 --zmx 指定待分析镜头。", file=sys.stderr)
+        return 2
+    if not args.config and not args.standard:
+        print("错误：--validate-only 需要 --config，或使用 --standard 标准模板模式。", file=sys.stderr)
         return 2
 
     from toltool import pipeline
 
     try:
-        cfg = pipeline.validate_config(args.zmx, args.config)
+        config = _standard_config_path(args) if args.standard else args.config
+        cfg = pipeline.validate_config(args.zmx, config)
     except Exception as e:
         print(f"配置校验失败：{e}", file=sys.stderr)
         return 1
 
     print("配置校验通过。")
+    if args.standard:
+        print(f"标准模板配置: {config}")
     print(f"评价函数有效行数: {len([r for r in cfg.mfe if str(r.get('操作数') or '').strip()])}")
     print(f"REPORT 启用行数: {len([r for r in cfg.report if _yes(r.get('启用'))])}")
     return 0
 
 
 def _cmd_run(args) -> int:
-    if not args.config:
-        print("错误：运行需要 --config 指定配置 Excel。", file=sys.stderr)
-        return 2
     if not args.zmx:
         print("错误：运行需要 --zmx 指定待分析镜头。", file=sys.stderr)
+        return 2
+    if not args.config and not args.standard:
+        print("错误：运行需要 --config，或使用 --standard 标准模板模式。", file=sys.stderr)
         return 2
 
     from toltool import pipeline, ztd_reader
 
+    config = _standard_config_path(args) if args.standard else args.config
+    if args.standard:
+        print(f"标准模板配置: {config}")
+
     prep = pipeline.prepare_session(
-        args.zmx, args.config, outdir=args.outdir, connect=args.connect)
+        args.zmx, config, outdir=args.outdir, connect=args.connect)
 
     export_stats = (not args.no_read) and _yes(prep.rp.get("输出统计Excel", "N"))
     result = pipeline.run_montecarlo(
@@ -166,6 +179,20 @@ def build_parser() -> argparse.ArgumentParser:
                    help="只校验 zmx 路径与 Excel 配置，不连接 Zemax、不跑分析")
     p.add_argument("--no-read", action="store_true",
                    help="跑完蒙特卡洛即停，不读取 ZTD（在 OpticStudio 中查看）")
+    p.add_argument("--standard", action="store_true",
+                   help="使用普通标准模板模式，不需要 --config")
+    p.add_argument("--standard-template", choices=standard_templates.TEMPLATE_NAMES,
+                   default="快速摸底", help="标准模板名称")
+    p.add_argument("--tolerance-level", choices=standard_templates.LEVEL_NAMES,
+                   default="标准", help="标准模板公差等级")
+    p.add_argument("--num-runs", type=int, default=20,
+                   help="标准模板模式的蒙特卡洛次数")
+    p.add_argument("--num-to-save", type=int, default=0,
+                   help="标准模板模式的 MC case 保存数量")
+    p.add_argument("--center-wave", type=int, default=0,
+                   help="标准模板模式的中心波长号，0=自动使用主波长")
+    p.add_argument("--comp-mode", default="无",
+                   help="标准模板模式的补偿器模式")
     return p
 
 

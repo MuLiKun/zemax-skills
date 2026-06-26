@@ -36,7 +36,6 @@ from dataclasses import dataclass, field
 
 COMP_ALIASES = {
     "全部优化dls": ["全部优化 (dls)", "全部优化(dls)", "dls"],
-    "近轴焦点": ["近轴焦点", "近轴"],
     "无": ["无"],
     "全部优化od": ["全部优化 (od)", "全部优化(od)", "od"],
 }
@@ -60,7 +59,7 @@ class RunSpec:
     tsc_name: str
     num_runs: int = 200
     num_to_save: int = 10
-    comp_mode: str = "近轴焦点"
+    comp_mode: str = "无"
     distribution: str = "正态"
     ztd_path: str = ""
     save_best_worst: bool = True

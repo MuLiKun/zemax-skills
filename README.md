@@ -26,6 +26,7 @@ agentstudy/
 - 按 Excel 配置自动写公差表（TDE）、评价函数（MFE）、生成 TSC 脚本
 - 支持运行前配置校验，不连接 Zemax 即可检查路径、Excel 与 MFE/REPORT 映射
 - 支持高级 Excel 视场映射：按目标归一化视场匹配/插入 tol 工作副本视场，自动改写 RSCE、GENC/GMTT/GMTS/GMTA 和 REPORT 标签，并输出 `mapped_excel.xlsx` 复核快照
+- 支持普通标准模板模式：GUI/CLI 可直接选择模板、公差等级、MC 次数、保存数量、补偿方式与是否保存 WC/BC；默认自动使用主波长、自动识别公差结束面，并启用标准模板视场映射（目标 `0,0.5,0.9`）
 - 跑脚本式蒙特卡洛公差分析，在每次运行的时间戳结果目录内保存工作副本、ZTD、日志与配置快照
 - 读取 ZTD，把点列 / GENC / 几何 MTF 等各 REPORT 分项独立成列做统计，并导出统计 Excel；Cpk1.33 上下限双边输出，按方向标黄用户关注侧
 - 支持独立分析已有 ZTD；表头优先从同名 TSC 的 `REPORT "标签" 行号` 反推
@@ -45,6 +46,12 @@ agentstudy/
 ```powershell
 cd tolerance_analysis
 ..\.venv\Scripts\python.exe -u main.py
+```
+
+普通标准模板模式（不需要手写 Excel，当前为后台/CLI/GUI 最小可用版；模板内容集中在 `tolerance_analysis/toltool/standard_templates.py`，可后续替换为正式标准）。当前行为：主波长自动识别、结束面自动取像面前一面、优化补偿未填后焦补偿面时自动取像面前一面、标准模板视场映射默认开启并使用 `0,0.5,0.9`，GUI 可勾选保存 WC/BC：
+
+```powershell
+.\.venv\Scripts\python.exe -u tolerance_analysis\tol_run.py --standard --zmx "镜头.zmx" --outdir "输出目录" --connect standalone --standard-template 快速摸底 --tolerance-level 标准 --num-runs 20
 ```
 
 一阶段基础检查（不连接 Zemax，含典型负向配置校验）：
@@ -70,6 +77,8 @@ cd tolerance_analysis
 
 > 仅记录功能层面的主要变更，便于追溯。日期格式 YYYY-MM-DD。
 
+- **2026-06-26** 普通标准模板模式增强：GUI 去除波长选择并默认使用 Zemax 主波长；运行期自动识别像面前一面作为公差结束面；优化补偿未填后焦补偿面时自动取像面前一面；标准模板视场映射默认开启，目标为 `0,0.5,0.9`；GUI 新增「保存 WC/BC」勾选项；`used_excel.xlsx` 记录运行期解析后的实际配置。
+- **2026-06-26** 第二阶段普通标准模板模式启动：新增后台/CLI/GUI 最小可用版，支持 `tol_run.py --standard` 或 GUI「普通标准模板」自动生成标准模板配置并复用现有 TDE/MFE/TSC/蒙卡/统计链路。
 - **2026-06-26** 高级 Excel 视场映射增强：目标归一化视场列改为可选覆盖项；空值时从 RSCE `Param4` 或 GENC/GMTT/GMTS/GMTA 原 `Param3` 自动推断；启用后输出 `mapped_excel.xlsx`，GUI/run.log 打印最终映射表和 MFE/REPORT 改写数量。
 - **2026-06-26** 第一阶段完成并冻结：完成多样本 GUI 端到端回归、工作副本隔离、运行产物追溯、ZTD 统计和 Stage 1.5 视场映射接入。
 - **2026-06-25** 运行产物隔离与追踪增强：每次运行进入时间戳结果目录，保存 `run.log`、`run_config.json`、`used_excel.xlsx`，并在日志中打印输出清单与保存策略。

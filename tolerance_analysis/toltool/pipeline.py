@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -128,6 +127,10 @@ def _validate_inputs(cfg, rp: dict) -> None:
         errors.append("保存数量不能小于 0")
     if num_to_save > num_runs:
         errors.append("保存数量不能大于蒙特卡洛次数")
+    comp_mode_key = str(rp.get("补偿器模式") or "无").strip().replace(" ", "").lower()
+    if comp_mode_key not in ("无", "none", "全部优化dls", "全部优化(dls)", "dls",
+                             "全部优化od", "全部优化(od)", "od"):
+        errors.append("补偿器模式仅支持：无、全部优化DLS、全部优化OD")
 
     valid_mfe_lines: set[int] = set()
     for row in cfg.mfe:
@@ -185,6 +188,23 @@ def validate_config(zmx: str, config: str):
     return cfg
 
 
+def _fill_auto_standard_surfaces(zos_system, cfg, rp: dict, log=print) -> None:
+    if str(rp.get("分析模式") or "").strip() != "标准模板":
+        return
+    try:
+        end_surface = max(1, int(zos_system.LDE.NumberOfSurfaces) - 2)
+    except Exception as e:
+        log(f"自动读取镜头面数失败，保留 Excel 中的公差范围: {e}")
+        return
+    changed = False
+    for row in cfg.tol_wizard:
+        if _as_int(row.get("结束面"), 0) <= 0:
+            row["结束面"] = end_surface
+            changed = True
+    if changed:
+        log(f"标准模板自动公差范围: 1-{end_surface}")
+
+
 @dataclass
 class Prepared:
     sess: object
@@ -221,22 +241,20 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
     log = _tee_logger(log, log_path)
     log(f"结果目录: {out}")
     log(f"日志文件: {log_path}")
-    try:
-        shutil.copy2(config, os.path.join(out, "used_excel.xlsx"))
-    except Exception as e:
-        log(f"保存 Excel 配置快照失败(忽略): {e}")
+    used_excel_path = os.path.join(out, "used_excel.xlsx")
 
+    standard_mode = str(rp.get("分析模式") or "").strip() == "标准模板"
     center_wave = _as_int(rp.get("中心波长号"), 0)
+    center_wave_auto = standard_mode and center_wave <= 0
     comp_surface = _as_int(rp.get("后焦补偿面"), 0)
     comp_min = _num(rp.get("补偿Min"))
     comp_max = _num(rp.get("补偿Max"))
     comp_freq = _num(rp.get("补偿线对"), 34.0)
-    comp_mode = str(rp.get("补偿器模式") or "近轴焦点").strip()
+    comp_mode = str(rp.get("补偿器模式") or "无").strip()
     # 补偿器模式=无 → 完全不补偿：TSC 不写优化行/不走双 MF、不建 comp MF、不加 TDE COMP。
-    # 模式≠无 → 写优化行 + comp MF（双 MF）；其中 TDE COMP 还需后焦补偿面>0 才落。
+    # 模式≠无 → 写优化行 + comp MF（双 MF）+ TDE COMP；未填后焦补偿面时自动用像面前一面。
     comp_off = str(comp_mode).replace(" ", "").lower() in ("无", "none", "")
     comp_on = not comp_off
-    add_comp_operand = comp_on and comp_surface > 0
 
     sess = zos_connect.ZosSession(zos_dir=zos_dir)
     log(f"ZOS 目录: {sess.zos_dir}")
@@ -254,6 +272,22 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
 
     copy = sess.open_as_copy(zmx, copy_path=copy_path)
     log(f"工作副本: {copy}")
+    lens_info = sess.read_lens_info()
+    if comp_on and comp_surface <= 0:
+        comp_surface = max(1, int(sess.sys.LDE.NumberOfSurfaces) - 2)
+        rp["后焦补偿面"] = comp_surface
+        log(f"未填后焦补偿面，已自动设置为像面前一面: {comp_surface}")
+    add_comp_operand = comp_on and comp_surface > 0
+    if center_wave_auto and lens_info.primary_wave > 0:
+        center_wave = lens_info.primary_wave
+        rp["中心波长号"] = center_wave
+        for row in cfg.mfe:
+            op = str(row.get("操作数") or "").strip().upper()
+            if op in ("RSCE", "GENC", "GMTT", "GMTS", "GMTA") \
+                    and _as_int(row.get("Param2"), 0) <= 0:
+                row["Param2"] = center_wave
+        log(f"已自动使用主波长号: {center_wave}")
+    _fill_auto_standard_surfaces(sess.sys, cfg, rp, log=log)
 
     cfg, field_mapping_result = field_mapping.process(sess.sys, cfg, rp, log=log)
     mapped_excel_path = ""
@@ -271,6 +305,12 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
             log(f"保存映射后 Excel 配置快照失败(忽略): {e}")
     else:
         log("视场映射：未启用")
+
+    try:
+        excel_io.write_config_snapshot(config, used_excel_path, cfg)
+        log(f"Excel 配置快照: {used_excel_path}")
+    except Exception as e:
+        log(f"保存 Excel 配置快照失败(忽略): {e}")
 
     base = os.path.splitext(os.path.basename(copy))[0]
     lens_dir = os.path.dirname(os.path.abspath(copy))
@@ -300,9 +340,6 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
 
     comp_mf_name = None
     if comp_on:
-        if comp_surface <= 0:
-            log(f"提示：补偿器模式={comp_mode} 但未填后焦补偿面，"
-                f"TSC 仍写优化行/补偿 MF，但 TDE 不加 COMP 面（补偿由 TSC 负责）。")
         wave_for_mf = center_wave if center_wave > 0 else 2
         _n_comp, comp_mf_path = mfe_builder.build_comp_mf(
             sess.sys, base, freq_lp=comp_freq, wave=wave_for_mf)
@@ -360,7 +397,7 @@ def make_runspec(prep: Prepared) -> tol_runner.RunSpec:
         tsc_name=os.path.basename(prep.tsc_path),
         num_runs=_as_int(rp.get("蒙特卡洛次数"), 200),
         num_to_save=_as_int(rp.get("保存数量"), 10),
-        comp_mode=str(rp.get("补偿器模式") or "近轴焦点").strip(),
+        comp_mode=str(rp.get("补偿器模式") or "无").strip(),
         distribution=str(rp.get("统计分布") or "正态").strip(),
         ztd_path=ztd_path,
         save_best_worst=save_worst or save_best,

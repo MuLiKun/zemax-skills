@@ -371,10 +371,18 @@ def process(zos_system, cfg, run_params: dict, log=print) -> tuple[object, Field
     messages.append(f"已按视场映射改写 MFE: {mfe_updates} 行")
     messages.append(f"已按视场映射改写 REPORT: {report_updates} 项")
     if mfe_updates == 0 and report_updates == 0:
-        messages.append(
-            "警告：已启用视场映射但 MFE/REPORT 一行未改写。"
-            "请检查评价函数是否含 RSCE/GENC/GMTT/GMTA/GMTS 行，"
-            "或填写“目标归一化视场”列（来源策略为仅显式时尤需填写）。")
+        has_field_ops = any(
+            str(r.get("操作数") or "").strip().upper() in _FIELD_OPS or
+            str(r.get("操作数") or "").strip().upper() == "RSCE"
+            for r in cfg.mfe
+        )
+        if has_field_ops:
+            messages.append("视场映射：评价函数视场相关行已匹配，无需改写。")
+        else:
+            messages.append(
+                "警告：已启用视场映射但 MFE/REPORT 一行未改写。"
+                "请检查评价函数是否含 RSCE/GENC/GMTT/GMTA/GMTS 行，"
+                "或填写“目标归一化视场”列（来源策略为仅显式时尤需填写）。")
 
     result = FieldMappingResult(True, strategy, threshold, targets, original, inserted,
                                 final_fields, final_matches, messages,

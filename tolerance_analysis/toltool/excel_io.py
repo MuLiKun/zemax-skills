@@ -85,7 +85,7 @@ _RUN_EX = [
     ["蒙特卡洛次数", 200, "NumberOfRuns"],
     ["保存数量", 10, "NumberToSave 保存最差前N个"],
     ["统计分布", "正态", "正态/均匀/抛物线"],
-    ["补偿器模式", "近轴焦点", "近轴焦点/全部优化DLS/无/全部优化OD"],
+    ["补偿器模式", "无", "无/全部优化DLS/全部优化OD"],
     ["TSC优化周期", 4, "TSC 内 OPTIMIZE n"],
     ["中心波长号", 2, "评估用 Wave 编号"],
     ["后焦补偿面", "", "COMP 补偿面号；留空=不加补偿器"],
@@ -290,14 +290,25 @@ def _rewrite_sheet(ws: Worksheet, header: list[str], rows: list[dict]) -> None:
     _write_table(ws, header, [[row.get(h) for h in header] for row in rows], highlight=False)
 
 
-def write_mapped_config(source_path: str, target_path: str, cfg: Config) -> str:
+def write_config_snapshot(source_path: str, target_path: str, cfg: Config) -> str:
     # 注：此处 load_workbook 不带 data_only=True，保留源文件公式以维持快照可读性；
     # read_config 用 data_only=True 读取计算值。若源含公式，二者展示值可能不同，
-    # 但本快照仅供人工核对映射结果，不参与计算，差异可接受。
+    # 但本快照仅供人工核对最终运行配置，不参与计算，差异可接受。
     wb = load_workbook(source_path)
+    if "输入_公差向导" in wb.sheetnames:
+        _rewrite_sheet(wb["输入_公差向导"], _TOL_WIZARD_HDR, cfg.tol_wizard)
+    if "输入_公差明细" in wb.sheetnames:
+        _rewrite_sheet(wb["输入_公差明细"], _TOL_DETAIL_HDR, cfg.tol_detail)
     if "输入_评价函数" in wb.sheetnames:
         _rewrite_sheet(wb["输入_评价函数"], _MFE_HDR, cfg.mfe)
     if "输入_REPORT" in wb.sheetnames:
         _rewrite_sheet(wb["输入_REPORT"], _REPORT_HDR, cfg.report)
+    if "输入_运行参数" in wb.sheetnames:
+        run_rows = [{"参数键": k, "值": v, "备注": "最终运行配置"} for k, v in cfg.run_params.items()]
+        _rewrite_sheet(wb["输入_运行参数"], _RUN_HDR, run_rows)
     wb.save(target_path)
     return target_path
+
+
+def write_mapped_config(source_path: str, target_path: str, cfg: Config) -> str:
+    return write_config_snapshot(source_path, target_path, cfg)
