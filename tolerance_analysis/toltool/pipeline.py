@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from . import (zos_connect, excel_io, tde_builder, mfe_builder,
-               tsc_builder, tol_runner)
+               tsc_builder, tol_runner, field_mapping)
 
 
 def _as_int(v, default: int) -> int:
@@ -238,6 +238,15 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
     copy = sess.open_as_copy(zmx, copy_path=copy_path)
     log(f"工作副本: {copy}")
 
+    cfg, field_mapping_result = field_mapping.process(sess.sys, cfg, rp, log=log)
+    if field_mapping_result.enabled:
+        log(f"已启用视场映射：目标 {len(field_mapping_result.targets)} 个，"
+            f"阈值 {field_mapping_result.threshold:g}，插入策略={field_mapping_result.insert_strategy}")
+        for msg in field_mapping_result.messages:
+            log(msg)
+    else:
+        log("视场映射：未启用")
+
     base = os.path.splitext(os.path.basename(copy))[0]
     lens_dir = os.path.dirname(os.path.abspath(copy))
 
@@ -301,6 +310,7 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
             "report": n_report,
         },
         "run_params": rp,
+        "field_mapping": field_mapping_result.to_dict(),
     })
     log(f"运行配置快照: {run_config_path}")
 
