@@ -74,6 +74,22 @@ def _write_json(path: str, data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
 
 
+def _fmt_num(value) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _log_field_mapping(result, log) -> None:
+    log("视场映射结果：")
+    for item in result.final_matches:
+        log(f"  {item.report_label:<7} -> 视场号 {item.field_no}，"
+            f"实际归一化 {_fmt_num(item.actual_normalized)}，偏差 {_fmt_num(item.delta)}")
+
+
 def _log_to_file(path: str, message: str) -> None:
     with open(path, "a", encoding="utf-8") as f:
         f.write(str(message) + "\n")
@@ -187,6 +203,7 @@ class Prepared:
     config_path: str = ""
     log_path: str = ""
     run_config_path: str = ""
+    mapped_excel_path: str = ""
 
 
 def prepare_session(zmx: str, config: str, outdir: str | None = None,
@@ -239,11 +256,19 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
     log(f"工作副本: {copy}")
 
     cfg, field_mapping_result = field_mapping.process(sess.sys, cfg, rp, log=log)
+    mapped_excel_path = ""
     if field_mapping_result.enabled:
         log(f"已启用视场映射：目标 {len(field_mapping_result.targets)} 个，"
             f"阈值 {field_mapping_result.threshold:g}，插入策略={field_mapping_result.insert_strategy}")
+        _log_field_mapping(field_mapping_result, log)
         for msg in field_mapping_result.messages:
             log(msg)
+        mapped_excel_path = os.path.join(out, "mapped_excel.xlsx")
+        try:
+            excel_io.write_mapped_config(config, mapped_excel_path, cfg)
+            log(f"映射后 Excel 配置快照: {mapped_excel_path}")
+        except Exception as e:
+            log(f"保存映射后 Excel 配置快照失败(忽略): {e}")
     else:
         log("视场映射：未启用")
 
@@ -311,6 +336,7 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
         },
         "run_params": rp,
         "field_mapping": field_mapping_result.to_dict(),
+        "mapped_excel": mapped_excel_path,
     })
     log(f"运行配置快照: {run_config_path}")
 
@@ -320,7 +346,8 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
                     lens_dir=lens_dir, parent_outdir=parent_out,
                     source_zmx=os.path.abspath(zmx),
                     config_path=os.path.abspath(config),
-                    log_path=log_path, run_config_path=run_config_path)
+                    log_path=log_path, run_config_path=run_config_path,
+                    mapped_excel_path=mapped_excel_path)
 
 
 def make_runspec(prep: Prepared) -> tol_runner.RunSpec:
@@ -362,6 +389,8 @@ def log_run_plan(prep: Prepared, spec: tol_runner.RunSpec, log=print,
     log(f"  运行日志: {prep.log_path}")
     log(f"  运行配置快照: {prep.run_config_path}")
     log(f"  Excel 配置快照: {used_excel}")
+    if prep.mapped_excel_path:
+        log(f"  映射后 Excel 配置快照: {prep.mapped_excel_path}")
     log("本次保存策略：")
     log(f"  蒙特卡洛次数: {spec.num_runs}")
     log(f"  保存数量: {spec.num_to_save}")
