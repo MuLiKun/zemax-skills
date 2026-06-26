@@ -15,7 +15,11 @@ from dataclasses import asdict, dataclass
 
 
 DEFAULT_TARGETS = "0,-0.25,0.25,-0.5,0.5,-0.7,0.7,-0.9,0.9,-1,1"
+_DEFAULT_THRESHOLD = 0.05
 _FIELD_OPS = {"GENC", "GMTT", "GMTS", "GMTA"}
+
+# 目标视场来源策略：仅“显式”时跳过自动反推；其余值（含默认“自动推断”）走自动推断。
+_SOURCE_EXPLICIT_ONLY = {"仅目标列", "仅显式", "explicit", "explicit_only", "manual"}
 
 
 @dataclass
@@ -50,6 +54,8 @@ class FieldMappingResult:
     final_fields: list[FieldItem]
     final_matches: list[FieldMatch]
     messages: list[str]
+    mfe_updates: int = 0
+    report_updates: int = 0
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -181,6 +187,54 @@ def _find_match(matches: list[FieldMatch], target: float) -> FieldMatch | None:
     return None
 
 
+def _nearest_match(matches: list[FieldMatch], target: float) -> FieldMatch | None:
+    valid = [m for m in matches if m.field_no is not None]
+    if not valid:
+        return None
+    return min(valid, key=lambda m: (abs(m.target_normalized - target), sort_key(m.target_normalized)))
+
+
+def _field_by_no(rows: list[FieldItem], field_no) -> FieldItem | None:
+    try:
+        no = int(float(field_no))
+    except (TypeError, ValueError):
+        return None
+    for row in rows:
+        if row.field_no == no:
+            return row
+    return None
+
+
+def _target_value(row: dict, original_fields: list[FieldItem], final_matches: list[FieldMatch],
+                  explicit_only: bool = False) -> float | None:
+    explicit = _num(row.get("目标归一化视场"))
+    if explicit is None:
+        explicit = _num(row.get("归一化视场"))
+    if explicit is not None:
+        match = _nearest_match(final_matches, explicit)
+        return match.target_normalized if match else explicit
+
+    if explicit_only:
+        return None
+
+    op = str(row.get("操作数") or "").strip().upper()
+    if op == "RSCE":
+        target = _num(row.get("Param4"))
+    elif op in _FIELD_OPS:
+        field = _field_by_no(original_fields, row.get("Param3"))
+        if field is None:
+            raise ValueError(
+                f"{op} 行 {row.get('行号')} 无法从 Param3={row.get('Param3')!r} "
+                f"反推原始归一化视场；请填写目标归一化视场。")
+        target = field.normalized
+    else:
+        target = None
+    if target is None:
+        return None
+    match = _nearest_match(final_matches, target)
+    return match.target_normalized if match else target
+
+
 def _num(value):
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
@@ -190,23 +244,31 @@ def _num(value):
         return None
 
 
-def _apply_to_mfe_rows(mfe_rows: list[dict], matches: list[FieldMatch]) -> list[dict]:
+def _apply_to_mfe_rows(mfe_rows: list[dict], original_fields: list[FieldItem],
+                       matches: list[FieldMatch], explicit_only: bool = False) -> tuple[list[dict], int]:
     new_rows = copy.deepcopy(mfe_rows)
+    updates = 0
     for row in new_rows:
         op = str(row.get("操作数") or "").strip().upper()
-        target = _num(row.get("归一化视场"))
-        if target is None and op == "RSCE":
-            target = _num(row.get("Param4"))
+        target = _target_value(row, original_fields, matches, explicit_only=explicit_only)
         if target is None:
             continue
         match = _find_match(matches, target)
         if match is None or match.field_no is None:
             continue
+        row["目标归一化视场"] = target
+        row["归一化视场"] = target
         if op in _FIELD_OPS:
+            old = row.get("Param3")
             row["Param3"] = match.field_no
+            if old != match.field_no:
+                updates += 1
         elif op == "RSCE":
+            old = row.get("Param4")
             row["Param4"] = target
-    return new_rows
+            if old != target:
+                updates += 1
+    return new_rows, updates
 
 
 def _base_report_name(label: str) -> str:
@@ -225,8 +287,10 @@ def _label_with_field(base: str, field_label: str) -> str:
     return f"{base}_{field_label}"
 
 
-def _apply_to_report_rows(report_rows: list[dict], mfe_rows: list[dict], matches: list[FieldMatch]) -> list[dict]:
+def _apply_to_report_rows(report_rows: list[dict], mfe_rows: list[dict],
+                          matches: list[FieldMatch]) -> tuple[list[dict], int]:
     new_rows = copy.deepcopy(report_rows)
+    updates = 0
     by_line: dict[int, dict] = {}
     for row in mfe_rows:
         line = row.get("行号")
@@ -242,16 +306,19 @@ def _apply_to_report_rows(report_rows: list[dict], mfe_rows: list[dict], matches
         mfe_row = by_line.get(mf_line)
         if not mfe_row:
             continue
-        target = _num(mfe_row.get("归一化视场"))
-        if target is None and str(mfe_row.get("操作数") or "").strip().upper() == "RSCE":
-            target = _num(mfe_row.get("Param4"))
+        target = _num(mfe_row.get("目标归一化视场"))
+        if target is None:
+            target = _num(mfe_row.get("归一化视场"))
         if target is None:
             continue
         match = _find_match(matches, target)
         if match is None:
             continue
-        row["标签"] = _label_with_field(_base_report_name(row.get("标签")), match.report_label)
-    return new_rows
+        new_label = _label_with_field(_base_report_name(row.get("标签")), match.report_label)
+        if row.get("标签") != new_label:
+            updates += 1
+        row["标签"] = new_label
+    return new_rows, updates
 
 
 def process(zos_system, cfg, run_params: dict, log=print) -> tuple[object, FieldMappingResult]:
@@ -259,10 +326,12 @@ def process(zos_system, cfg, run_params: dict, log=print) -> tuple[object, Field
     strategy = str(run_params.get("视场插入策略") or "禁用").strip()
     messages: list[str] = []
     if not enabled:
-        result = FieldMappingResult(False, strategy, 0.05, [], [], [], [], [], messages)
+        result = FieldMappingResult(False, strategy, _DEFAULT_THRESHOLD, [], [], [], [], [], messages)
         return cfg, result
 
-    threshold = float(run_params.get("视场匹配阈值") or 0.05)
+    threshold = float(run_params.get("视场匹配阈值") or _DEFAULT_THRESHOLD)
+    source = str(run_params.get("目标视场来源策略") or "自动推断").strip()
+    explicit_only = source.replace(" ", "").lower() in _SOURCE_EXPLICIT_ONLY
     targets = parse_targets(run_params.get("目标归一化视场") or DEFAULT_TARGETS)
     original = build_field_items(_read_fields(zos_system))
     initial_matches = build_matches(original, targets, threshold)
@@ -296,8 +365,18 @@ def process(zos_system, cfg, run_params: dict, log=print) -> tuple[object, Field
         raise RuntimeError(f"视场插入后仍有目标视场未满足阈值：{labels}")
 
     new_cfg = copy.deepcopy(cfg)
-    new_cfg.mfe = _apply_to_mfe_rows(cfg.mfe, final_matches)
-    new_cfg.report = _apply_to_report_rows(cfg.report, new_cfg.mfe, final_matches)
+    new_cfg.mfe, mfe_updates = _apply_to_mfe_rows(cfg.mfe, original, final_matches,
+                                                  explicit_only=explicit_only)
+    new_cfg.report, report_updates = _apply_to_report_rows(cfg.report, new_cfg.mfe, final_matches)
+    messages.append(f"已按视场映射改写 MFE: {mfe_updates} 行")
+    messages.append(f"已按视场映射改写 REPORT: {report_updates} 项")
+    if mfe_updates == 0 and report_updates == 0:
+        messages.append(
+            "警告：已启用视场映射但 MFE/REPORT 一行未改写。"
+            "请检查评价函数是否含 RSCE/GENC/GMTT/GMTA/GMTS 行，"
+            "或填写“目标归一化视场”列（来源策略为仅显式时尤需填写）。")
 
-    result = FieldMappingResult(True, strategy, threshold, targets, original, inserted, final_fields, final_matches, messages)
+    result = FieldMappingResult(True, strategy, threshold, targets, original, inserted,
+                                final_fields, final_matches, messages,
+                                mfe_updates=mfe_updates, report_updates=report_updates)
     return new_cfg, result
