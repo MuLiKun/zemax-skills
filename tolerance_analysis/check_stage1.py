@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     if not py.exists():
         raise FileNotFoundError(f"Python 解释器不存在：{py}")
 
-    print("[1/8] Python 编译检查")
+    print("[1/10] Python 编译检查")
     py_files = [
         script_dir / "check_stage1.py",
         script_dir / "main.py",
@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     _compile(py_files)
 
-    print("[2/8] 生成临时 Excel 模板")
+    print("[2/10] 生成临时 Excel 模板")
     with tempfile.TemporaryDirectory(prefix="zemax_tol_stage1_") as tmp:
         tmp_dir = Path(tmp)
         template = tmp_dir / "tol_config_check.xlsx"
@@ -91,21 +91,21 @@ def main(argv: list[str] | None = None) -> int:
         _run([str(py), "-u", "tol_run.py", "--init-template",
               "--config", str(template), "--overwrite"], cwd=script_dir)
 
-        print("[3/8] validate-only 正向检查")
+        print("[3/10] validate-only 正向检查")
         _run([str(py), "-u", "tol_run.py", "--validate-only",
               "--zmx", str(dummy_zmx), "--config", str(template)], cwd=script_dir)
 
-        print("[4/8] validate-only 负向检查：缺失 zmx")
+        print("[4/10] validate-only 负向检查：缺失 zmx")
         _run_expect_fail([str(py), "-u", "tol_run.py", "--validate-only",
                           "--zmx", str(tmp_dir / "missing.zmx"),
                           "--config", str(template)], cwd=script_dir)
 
-        print("[5/8] validate-only 负向检查：缺失 Excel")
+        print("[5/10] validate-only 负向检查：缺失 Excel")
         _run_expect_fail([str(py), "-u", "tol_run.py", "--validate-only",
                           "--zmx", str(dummy_zmx),
                           "--config", str(tmp_dir / "missing.xlsx")], cwd=script_dir)
 
-        print("[6/8] validate-only 负向检查：保存数量大于 MC 次数")
+        print("[6/10] validate-only 负向检查：保存数量大于 MC 次数")
         bad_save_count = _copy_template(template, tmp_dir / "bad_save_count.xlsx")
         _set_run_param(bad_save_count, "蒙特卡洛次数", 5)
         _set_run_param(bad_save_count, "保存数量", 6)
@@ -113,18 +113,29 @@ def main(argv: list[str] | None = None) -> int:
                           "--zmx", str(dummy_zmx),
                           "--config", str(bad_save_count)], cwd=script_dir)
 
-        print("[7/8] validate-only 负向检查：REPORT 指向不存在 MFE 行号")
+        print("[7/10] validate-only 负向检查：REPORT 指向不存在 MFE 行号")
         bad_report = _copy_template(template, tmp_dir / "bad_report.xlsx")
         _set_report_mf_line(bad_report, "SPOT_Hy0.0", 999)
         _run_expect_fail([str(py), "-u", "tol_run.py", "--validate-only",
                           "--zmx", str(dummy_zmx),
                           "--config", str(bad_report)], cwd=script_dir)
 
-        print("[8/8] 标准模板模式 validate-only 正向检查")
+        print("[8/10] 标准模板模式 validate-only 正向检查")
         _run([str(py), "-u", "tol_run.py", "--validate-only", "--standard",
               "--zmx", str(dummy_zmx), "--outdir", str(tmp_dir),
               "--standard-template", "快速摸底", "--tolerance-level", "标准",
               "--num-runs", "5", "--num-to-save", "0"], cwd=script_dir)
+
+        print("[9/10] 当前设置模式 validate-only 正向检查")
+        _run([str(py), "-u", "tol_run.py", "--validate-only", "--current-settings",
+              "--zmx", str(dummy_zmx), "--outdir", str(tmp_dir),
+              "--num-runs", "5", "--num-to-save", "0"], cwd=script_dir)
+
+        print("[10/10] 当前设置模式 validate-only 负向检查：缺失 zmx")
+        _run_expect_fail([str(py), "-u", "tol_run.py", "--validate-only", "--current-settings",
+                          "--zmx", str(tmp_dir / "missing_current.zmx"),
+                          "--outdir", str(tmp_dir),
+                          "--num-runs", "5", "--num-to-save", "0"], cwd=script_dir)
 
     print("基础检查通过。")
     return 0

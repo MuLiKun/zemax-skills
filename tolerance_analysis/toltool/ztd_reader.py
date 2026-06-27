@@ -5,10 +5,10 @@
 - 矩阵列布局（probe 实测，05304_tol.ZTD 200x110）：
     col0      = 综合判据（评价函数总标量）
     col1..colN = N 个 REPORT 分项，顺序与 TSC 的 REPORT 完全一致
-    其后各列 = 各单项公差灵敏度数据（本模块不解析）
+    其后各列 = 各单项公差数据；本模块只按 TDE 顺序额外提取 COMP
 - 对每个分项列统计：有效次数 N / 均值 / 标准差 / 最好 / 最差 / 2σ / 百分位。
-- Cpk=1.33 规格限双边输出，并按 REPORT 方向标记用户更关注的一侧。
-- 标签优先用调用方传入的 REPORT 标签；否则从 Summary「相对评估脚本」段解析。
+- Cpk=1.33 规格限双边输出，并按 REPORT/COMP 方向标记用户更关注的一侧。
+- REPORT 标签优先用调用方传入值；否则从 Summary「相对评估脚本」段解析。COMP 标签来自 TDE 元数据。
 
 读取陷阱（skill §2e，务必遵守）：
 - 读结果前工具一次只能开一个；本模块自行 OpenToleranceDataViewer。
@@ -23,6 +23,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -315,8 +316,9 @@ def _stats(values, direction: str = ""):
 
 
 def read_ztd(zos_system, ztd_path: str, num_runs: int,
-             report_labels=None, num_items=None, report_meta=None) -> ZtdResult:
-    """打开 ZTD，统计 col1..colN 各分项。"""
+             report_labels=None, num_items=None, report_meta=None,
+             tde_meta=None) -> ZtdResult:
+    """打开 ZTD，统计自定义脚本、REPORT 分项和 TDE 中的 COMP 项。"""
     dv = zos_system.Tools.OpenToleranceDataViewer()
     try:
         dv.FileName = ztd_path
@@ -373,17 +375,34 @@ def read_ztd(zos_system, ztd_path: str, num_runs: int,
 
         nrow = int(num_runs)
         if num_items is not None:
-            data_cols = list(range(0, min(int(num_items), ncol)))
+            base_item_count = int(num_items)
+        elif report_labels:
+            base_item_count = len(report_labels) + 1
+        elif meta:
+            base_item_count = len(meta) + 1
         else:
-            data_cols = list(range(0, ncol))
+            base_item_count = ncol
+        report_count = max(0, base_item_count - 1)
+        selected_cols = list(range(0, min(base_item_count, ncol)))
+        comp_meta_by_col: dict[int, dict] = {}
+        for tde_index, row in enumerate(list(tde_meta or [])):
+            if str(row.get("操作数") or "").strip().upper() != "COMP":
+                continue
+            col = report_count + tde_index
+            if 0 <= col < ncol:
+                comp_meta_by_col[col] = row
+                if col not in selected_cols:
+                    selected_cols.append(col)
+        selected_cols.sort()
+        read_cols = list(range(0, min(max(selected_cols) + 1, ncol))) if selected_cols else []
 
-        buckets = {c: [] for c in data_cols}
+        buckets = {c: [] for c in read_cols}
         actual_rows = 0
         row_limited = False
         for i in range(nrow):
             row_values = []
             try:
-                for j in data_cols:
+                for j in read_cols:
                     row_values.append(v.GetValueAt(i, j))
             except Exception as e:
                 if i > 0 and "IndexOutOfRange" in type(e).__name__:
@@ -393,19 +412,23 @@ def read_ztd(zos_system, ztd_path: str, num_runs: int,
                     row_limited = True
                     break
                 raise
-            for j, value in zip(data_cols, row_values):
+            for j, value in zip(read_cols, row_values):
                 buckets[j].append(value)
             actual_rows += 1
 
-        if data_cols and actual_rows <= 0:
+        if selected_cols and actual_rows <= 0:
             return ZtdResult(False, ztd_path, num_runs, ncol,
                              message="ZTD 中未能读取到 Monte Carlo 数据行。")
 
         items = []
         tsc_used = 0
-        for idx, c in enumerate(data_cols):
+        for idx, c in enumerate(selected_cols):
+            comp_meta = comp_meta_by_col.get(c)
             label = ""
-            if c < len(ztd_labels):
+            if comp_meta:
+                label = _clean_label(comp_meta.get("标签")) or "COMP"
+                label = f"{label} (TDE{comp_meta.get('行号')}, col{c})"
+            elif c < len(ztd_labels):
                 label = _clean_label(ztd_labels[c])
             fallback_idx = c - 1 if c > 0 else -1
             if not label and c == 0 and tsc_labels:
@@ -423,7 +446,10 @@ def read_ztd(zos_system, ztd_path: str, num_runs: int,
             direction = ""
             unit = ""
             meta_idx = c - 1 if c > 0 else -1
-            if 0 <= meta_idx < len(meta):
+            if comp_meta:
+                direction = str(comp_meta.get("方向") or "").strip()
+                unit = str(comp_meta.get("单位") or "").strip()
+            elif 0 <= meta_idx < len(meta):
                 direction = str(meta[meta_idx].get("方向") or "").strip()
                 unit = str(meta[meta_idx].get("单位") or "").strip()
             stat = _stats(buckets[c], direction=direction)
@@ -452,6 +478,12 @@ def read_ztd(zos_system, ztd_path: str, num_runs: int,
             searched = "；".join(tsc_candidates)
             messages.append(
                 f"未搜索到同名 TSC，无法反推 REPORT 表头，Excel 将按 colN 输出。已搜索：{searched}")
+        if tde_meta:
+            requested_comp = sum(
+                1 for row in tde_meta
+                if str(row.get("操作数") or "").strip().upper() == "COMP")
+            messages.append(
+                f"按 TDE 顺序定位 COMP：已读取 {len(comp_meta_by_col)}/{requested_comp} 个 COMP 列。")
         unresolved = sum(1 for it in items if str(it.label).startswith("col"))
         if unresolved:
             messages.append(
@@ -570,5 +602,11 @@ def export_excel(result: ZtdResult, path: str) -> str:
             ws2.cell(row=r, column=c, value=value)
     ws2.column_dimensions["A"].width = 18
     ws2.column_dimensions["B"].width = 96
-    wb.save(path)
-    return path
+    try:
+        wb.save(path)
+        return path
+    except PermissionError:
+        base, ext = os.path.splitext(path)
+        fallback = f"{base}_{datetime.now().strftime('%H%M%S')}{ext or '.xlsx'}"
+        wb.save(fallback)
+        return fallback

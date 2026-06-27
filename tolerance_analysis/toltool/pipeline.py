@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from . import (zos_connect, excel_io, tde_builder, mfe_builder,
-               tsc_builder, tol_runner, field_mapping)
+               tsc_builder, tol_runner, field_mapping, current_settings)
 
 
 def _as_int(v, default: int) -> int:
@@ -44,6 +44,40 @@ def _safe_name(name: str) -> str:
     text = re.sub(r'[<>:"/\\|?*\s]+', "_", str(name).strip())
     text = text.strip("._")
     return text or "lens"
+
+
+def _enum_name(value) -> str:
+    text = str(value or "").strip()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    text = text.upper()
+    match = re.search(r"[A-Z]{3,4}", text)
+    return match.group(0) if match else text
+
+
+def _read_tde_meta(zos_system) -> list[dict]:
+    tde = zos_system.TDE
+    rows: list[dict] = []
+    for i in range(1, int(tde.NumberOfOperands) + 1):
+        r = tde.GetOperandAt(i)
+        op = _enum_name(getattr(r, "Type", ""))
+        if not op or op == "BLNK":
+            continue
+        row = {"行号": i, "操作数": op}
+        for name in ("Param1", "Param2", "Min", "Max", "Comment"):
+            try:
+                row[name] = getattr(r, name)
+            except Exception:
+                row[name] = ""
+        if op == "COMP":
+            comment = str(row.get("Comment") or "").strip()
+            surf = row.get("Param1")
+            suffix = f"_S{surf}" if str(surf).strip() else ""
+            row["标签"] = comment or f"COMP{suffix}"
+            row["方向"] = ""
+            row["单位"] = "mm"
+        rows.append(row)
+    return rows
 
 
 def _make_run_dir(zmx: str, outdir: str | None) -> tuple[str, str]:
@@ -82,11 +116,41 @@ def _fmt_num(value) -> str:
         return str(value)
 
 
-def _log_field_mapping(result, log) -> None:
-    log("视场映射结果：")
+def _field_mapping_report_lines(result) -> list[str]:
+    lines = [
+        "视场映射报告",
+        f"目标视场数: {len(result.targets)}",
+        f"匹配阈值: {result.threshold:g}",
+        f"插入策略: {result.insert_strategy}",
+        "",
+        "匹配结果:",
+    ]
     for item in result.final_matches:
-        log(f"  {item.report_label:<7} -> 视场号 {item.field_no}，"
+        lines.append(
+            f"{item.report_label:<7} -> 视场号 {item.field_no}，"
             f"实际归一化 {_fmt_num(item.actual_normalized)}，偏差 {_fmt_num(item.delta)}")
+    lines.extend([
+        "",
+        f"已插入缺失视场: {len(result.inserted_fields)}",
+        f"已改写 MFE: {result.mfe_updates} 行",
+        f"已改写 REPORT: {result.report_updates} 项",
+    ])
+    if result.messages:
+        lines.append("")
+        lines.append("过程提示:")
+        lines.extend(str(msg) for msg in result.messages)
+    return lines
+
+
+def _log_field_mapping(result, log) -> None:
+    for line in _field_mapping_report_lines(result):
+        if line:
+            log(line)
+
+
+def _write_field_mapping_report(path: str, result) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(_field_mapping_report_lines(result)) + "\n")
 
 
 def _log_to_file(path: str, message: str) -> None:
@@ -223,18 +287,28 @@ class Prepared:
     config_path: str = ""
     log_path: str = ""
     run_config_path: str = ""
-    mapped_excel_path: str = ""
+    field_mapping_report_path: str = ""
+    tde_meta: list | None = None
 
 
 def prepare_session(zmx: str, config: str, outdir: str | None = None,
                     connect: str = "extension", log=print,
-                    zos_dir: str | None = None) -> Prepared:
-    """连接 Zemax、打开工作副本，按 Excel 重建 TDE/MFE/TSC 并 Save。
+                    zos_dir: str | None = None,
+                    use_current_settings: bool = False,
+                    current_args: dict | None = None) -> Prepared:
+    """连接 Zemax、打开工作副本并完成 TSC/Save 准备。
 
-    两方案共用。返回 Prepared，方案A 据此跑蒙卡，方案B 据此提示用户。
+    默认按 Excel 重建 TDE/MFE；use_current_settings=True 时保留当前 TDE/MFE，
+    只从工作副本当前 MFE 自动生成 REPORT/TSC。
     """
-    cfg = validate_config(zmx, config)
-    rp = cfg.run_params
+    if use_current_settings:
+        if not os.path.isfile(zmx):
+            raise ValueError(f"运行前校验失败：\n- ZMX 文件不存在：{zmx}")
+        cfg = None
+        rp = {}
+    else:
+        cfg = validate_config(zmx, config)
+        rp = cfg.run_params
 
     parent_out, out = _make_run_dir(zmx, outdir)
     log_path = os.path.join(out, "run.log")
@@ -272,12 +346,49 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
 
     copy = sess.open_as_copy(zmx, copy_path=copy_path)
     log(f"工作副本: {copy}")
+    if use_current_settings:
+        current_args = current_args or {}
+        cfg = current_settings.build_config_from_current_mfe(
+            sess.sys,
+            num_runs=_as_int(current_args.get("num_runs"), 20),
+            num_to_save=_as_int(current_args.get("num_to_save"), 0),
+            comp_mode=str(current_args.get("comp_mode") or "无"),
+            save_worst_best=_yes(current_args.get("save_worst_best")))
+        rp = cfg.run_params
+        _validate_inputs(cfg, rp)
+        standard_mode = False
+        center_wave = _as_int(rp.get("中心波长号"), 0)
+        center_wave_auto = False
+        comp_surface = _as_int(rp.get("后焦补偿面"), 0)
+        comp_min = _num(rp.get("补偿Min"))
+        comp_max = _num(rp.get("补偿Max"))
+        comp_freq = _num(rp.get("补偿线对"), 34.0)
+        comp_mode = str(rp.get("补偿器模式") or "无").strip()
+        comp_off = str(comp_mode).replace(" ", "").lower() in ("无", "none", "")
+        comp_on = not comp_off
+        has_tde_comp = current_settings.tde_has_comp(sess.sys)
+        if comp_on and not has_tde_comp:
+            log("当前 TDE 无 COMP 操作数，强制关闭补偿器优化（TSC 不写 OPTIMIZE 行）。")
+            comp_mode = "无"
+            comp_off = True
+            comp_on = False
+            rp["补偿器模式"] = "无"
+        elif comp_on and has_tde_comp:
+            comp_freq = current_settings.detect_comp_freq_from_mfe(cfg)
+            if comp_freq and comp_freq > 0:
+                rp["补偿线对"] = comp_freq
+                log(f"当前 TDE 含 COMP，补偿 MF 线对取自 MFE MTF 操作数: {comp_freq} lp/mm")
+            else:
+                log("当前 TDE 含 COMP，补偿 MF 线对将使用默认值")
+        log("当前设置模式：已读取当前 MFE，保留当前 TDE。")
+        for msg in current_settings.summarize_config(cfg):
+            log(msg)
     lens_info = sess.read_lens_info()
-    if comp_on and comp_surface <= 0:
+    if comp_on and comp_surface <= 0 and not use_current_settings:
         comp_surface = max(1, int(sess.sys.LDE.NumberOfSurfaces) - 2)
         rp["后焦补偿面"] = comp_surface
         log(f"未填后焦补偿面，已自动设置为像面前一面: {comp_surface}")
-    add_comp_operand = comp_on and comp_surface > 0
+    add_comp_operand = comp_on and comp_surface > 0 and not use_current_settings
     if center_wave_auto and lens_info.primary_wave > 0:
         center_wave = lens_info.primary_wave
         rp["中心波长号"] = center_wave
@@ -290,24 +401,26 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
     _fill_auto_standard_surfaces(sess.sys, cfg, rp, log=log)
 
     cfg, field_mapping_result = field_mapping.process(sess.sys, cfg, rp, log=log)
-    mapped_excel_path = ""
+    field_mapping_report_path = ""
     if field_mapping_result.enabled:
         log(f"已启用视场映射：目标 {len(field_mapping_result.targets)} 个，"
             f"阈值 {field_mapping_result.threshold:g}，插入策略={field_mapping_result.insert_strategy}")
         _log_field_mapping(field_mapping_result, log)
-        for msg in field_mapping_result.messages:
-            log(msg)
-        mapped_excel_path = os.path.join(out, "mapped_excel.xlsx")
+        field_mapping_report_path = os.path.join(out, "field_mapping.txt")
         try:
-            excel_io.write_mapped_config(config, mapped_excel_path, cfg)
-            log(f"映射后 Excel 配置快照: {mapped_excel_path}")
+            _write_field_mapping_report(field_mapping_report_path, field_mapping_result)
+            log(f"视场映射报告: {field_mapping_report_path}")
         except Exception as e:
-            log(f"保存映射后 Excel 配置快照失败(忽略): {e}")
+            log(f"保存视场映射报告失败(忽略): {e}")
+            field_mapping_report_path = ""
     else:
         log("视场映射：未启用")
 
     try:
-        excel_io.write_config_snapshot(config, used_excel_path, cfg)
+        if use_current_settings:
+            current_settings.write_config_excel(used_excel_path, cfg, overwrite=True)
+        else:
+            excel_io.write_config_snapshot(config, used_excel_path, cfg)
         log(f"Excel 配置快照: {used_excel_path}")
     except Exception as e:
         log(f"保存 Excel 配置快照失败(忽略): {e}")
@@ -323,24 +436,32 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
         except Exception as e:
             log(f"读取测试波长失败(忽略): {e}")
 
-    comp_surface_eff = comp_surface if add_comp_operand else 0
-    n_tde = tde_builder.build_and_write(
-        sess.sys, cfg.tol_wizard, cfg.tol_detail,
-        center_wave=center_wave, test_wavelength_um=test_wl,
-        comp_surface=comp_surface_eff, comp_min=comp_min, comp_max=comp_max)
-    if add_comp_operand:
-        log(f"已写入 TDE 公差: {n_tde} 条（含后焦补偿面 {comp_surface}，测试波长 {test_wl}um）")
-    elif comp_off and comp_surface > 0:
-        log(f"已写入 TDE 公差: {n_tde} 条（补偿器模式=无，已忽略后焦补偿面 {comp_surface}，测试波长 {test_wl}um）")
+    if use_current_settings:
+        n_tde = 0
+        log("当前设置模式：跳过 TDE 重建，保留镜头文件现有 TDE。")
+        n_mfe = len(cfg.mfe)
+        mf_path = mfe_builder.default_mf_path(sess.sys, base)
+        mfe_builder.save_mf(sess.sys, mf_path)
+        log(f"当前设置模式：已保存当前 MFE: {n_mfe} 行  → {mf_path}")
     else:
-        log(f"已写入 TDE 公差: {n_tde} 条（不加 COMP 操作数，测试波长 {test_wl}um）")
+        comp_surface_eff = comp_surface if add_comp_operand else 0
+        n_tde = tde_builder.build_and_write(
+            sess.sys, cfg.tol_wizard, cfg.tol_detail,
+            center_wave=center_wave, test_wavelength_um=test_wl,
+            comp_surface=comp_surface_eff, comp_min=comp_min, comp_max=comp_max)
+        if add_comp_operand:
+            log(f"已写入 TDE 公差: {n_tde} 条（含后焦补偿面 {comp_surface}，测试波长 {test_wl}um）")
+        elif comp_off and comp_surface > 0:
+            log(f"已写入 TDE 公差: {n_tde} 条（补偿器模式=无，已忽略后焦补偿面 {comp_surface}，测试波长 {test_wl}um）")
+        else:
+            log(f"已写入 TDE 公差: {n_tde} 条（不加 COMP 操作数，测试波长 {test_wl}um）")
 
-    n_mfe, mf_path = mfe_builder.build_and_save(sess.sys, cfg.mfe, base)
-    log(f"已重建 MFE: {n_mfe} 行  → {mf_path}")
+        n_mfe, mf_path = mfe_builder.build_and_save(sess.sys, cfg.mfe, base)
+        log(f"已重建 MFE: {n_mfe} 行  → {mf_path}")
 
     comp_mf_name = None
     if comp_on:
-        wave_for_mf = center_wave if center_wave > 0 else 2
+        wave_for_mf = center_wave if center_wave > 0 else (lens_info.primary_wave or 2)
         _n_comp, comp_mf_path = mfe_builder.build_comp_mf(
             sess.sys, base, freq_lp=comp_freq, wave=wave_for_mf)
         comp_mf_name = os.path.basename(comp_mf_path)
@@ -353,12 +474,17 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
         comp_mode=comp_mode, comp_mf_name=comp_mf_name)
     log(f"已生成 TSC: {n_report} 个 REPORT 分项  → {tsc_path}")
 
+    tde_meta = _read_tde_meta(sess.sys)
+    comp_count = sum(1 for row in tde_meta if row.get("操作数") == "COMP")
+    if comp_count:
+        log(f"已记录 TDE 元数据：{len(tde_meta)} 个公差操作数，其中 COMP {comp_count} 个。")
+
     sess.sys.Save()
 
     run_config_path = os.path.join(out, "run_config.json")
     _write_json(run_config_path, {
         "source_zmx": os.path.abspath(zmx),
-        "config_excel": os.path.abspath(config),
+        "config_excel": os.path.abspath(config) if config else "",
         "parent_outdir": parent_out,
         "result_outdir": out,
         "connect": connect,
@@ -371,9 +497,10 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
             "mfe": n_mfe,
             "report": n_report,
         },
+        "tde_meta": tde_meta,
         "run_params": rp,
         "field_mapping": field_mapping_result.to_dict(),
-        "mapped_excel": mapped_excel_path,
+        "field_mapping_report": field_mapping_report_path,
     })
     log(f"运行配置快照: {run_config_path}")
 
@@ -382,9 +509,10 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
                     n_tde=n_tde, n_mfe=n_mfe, n_report=n_report,
                     lens_dir=lens_dir, parent_outdir=parent_out,
                     source_zmx=os.path.abspath(zmx),
-                    config_path=os.path.abspath(config),
+                    config_path=os.path.abspath(config) if config else "",
                     log_path=log_path, run_config_path=run_config_path,
-                    mapped_excel_path=mapped_excel_path)
+                    field_mapping_report_path=field_mapping_report_path,
+                    tde_meta=tde_meta)
 
 
 def make_runspec(prep: Prepared) -> tol_runner.RunSpec:
@@ -426,8 +554,8 @@ def log_run_plan(prep: Prepared, spec: tol_runner.RunSpec, log=print,
     log(f"  运行日志: {prep.log_path}")
     log(f"  运行配置快照: {prep.run_config_path}")
     log(f"  Excel 配置快照: {used_excel}")
-    if prep.mapped_excel_path:
-        log(f"  映射后 Excel 配置快照: {prep.mapped_excel_path}")
+    if prep.field_mapping_report_path:
+        log(f"  视场映射报告: {prep.field_mapping_report_path}")
     log("本次保存策略：")
     log(f"  蒙特卡洛次数: {spec.num_runs}")
     log(f"  保存数量: {spec.num_to_save}")

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from toltool import excel_io, standard_templates
@@ -67,15 +68,22 @@ def _as_int(v, default: int) -> int:
 def _standard_config_path(args) -> str:
     return standard_templates.make_temp_config(
         args.zmx, args.outdir, args.standard_template, args.tolerance_level,
-        args.num_runs, args.num_to_save, args.center_wave, args.comp_mode)
+        args.num_runs, args.num_to_save, args.center_wave, args.comp_mode,
+        args.save_worst_best)
 
 
 def _cmd_validate_only(args) -> int:
     if not args.zmx:
         print("错误：--validate-only 需要 --zmx 指定待分析镜头。", file=sys.stderr)
         return 2
+    if args.current_settings:
+        if not os.path.isfile(args.zmx):
+            print(f"配置校验失败：运行前校验失败：\n- ZMX 文件不存在：{args.zmx}", file=sys.stderr)
+            return 1
+        print("当前设置模式 validate-only：已校验 zmx 路径；MFE/TDE 需连接 Zemax 后运行期读取。")
+        return 0
     if not args.config and not args.standard:
-        print("错误：--validate-only 需要 --config，或使用 --standard 标准模板模式。", file=sys.stderr)
+        print("错误：--validate-only 需要 --config，或使用 --standard / --current-settings。", file=sys.stderr)
         return 2
 
     from toltool import pipeline
@@ -99,8 +107,8 @@ def _cmd_run(args) -> int:
     if not args.zmx:
         print("错误：运行需要 --zmx 指定待分析镜头。", file=sys.stderr)
         return 2
-    if not args.config and not args.standard:
-        print("错误：运行需要 --config，或使用 --standard 标准模板模式。", file=sys.stderr)
+    if not args.config and not args.standard and not args.current_settings:
+        print("错误：运行需要 --config，或使用 --standard / --current-settings。", file=sys.stderr)
         return 2
 
     from toltool import pipeline, ztd_reader
@@ -108,9 +116,18 @@ def _cmd_run(args) -> int:
     config = _standard_config_path(args) if args.standard else args.config
     if args.standard:
         print(f"标准模板配置: {config}")
+    if args.current_settings:
+        print("当前设置模式：将复用工作副本中的现有 TDE/MFE。")
 
     prep = pipeline.prepare_session(
-        args.zmx, config, outdir=args.outdir, connect=args.connect)
+        args.zmx, config, outdir=args.outdir, connect=args.connect,
+        use_current_settings=args.current_settings,
+        current_args={
+            "num_runs": args.num_runs,
+            "num_to_save": args.num_to_save,
+            "comp_mode": args.comp_mode,
+            "save_worst_best": args.save_worst_best,
+        })
 
     export_stats = (not args.no_read) and _yes(prep.rp.get("输出统计Excel", "N"))
     result = pipeline.run_montecarlo(
@@ -134,15 +151,19 @@ def _cmd_run(args) -> int:
         ]
         report_labels = [str(r.get("标签")).strip() for r in report_meta]
         num_items = len(report_labels) + 1 if report_labels else None
+        comp_count = sum(
+            1 for r in (prep.tde_meta or [])
+            if str(r.get("操作数") or "").strip().upper() == "COMP")
         if num_items:
             pipeline.append_run_log(
-                prep, f"ZTD 自动统计分项: {num_items} 项（自定义脚本 + {len(report_labels)} 个 REPORT）")
+                prep, f"ZTD 自动统计分项: {num_items + comp_count} 项（自定义脚本 + {len(report_labels)} 个 REPORT + {comp_count} 个 COMP）")
         num_runs = _as_int(prep.rp.get("蒙特卡洛次数"), 200)
         zres = ztd_reader.read_ztd(
             prep.sess.sys, result.ztd_path, num_runs=num_runs,
             report_labels=report_labels or None,
             num_items=num_items,
-            report_meta=report_meta or None)
+            report_meta=report_meta or None,
+            tde_meta=prep.tde_meta or None)
         print()
         print(ztd_reader.format_table(zres))
         if not zres.succeeded:
@@ -181,6 +202,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="跑完蒙特卡洛即停，不读取 ZTD（在 OpticStudio 中查看）")
     p.add_argument("--standard", action="store_true",
                    help="使用普通标准模板模式，不需要 --config")
+    p.add_argument("--current-settings", action="store_true",
+                   help="使用 Zemax 当前设置模式：复用 zmx 中已有 TDE/MFE，不需要 --config")
     p.add_argument("--standard-template", choices=standard_templates.TEMPLATE_NAMES,
                    default="快速摸底", help="标准模板名称")
     p.add_argument("--tolerance-level", choices=standard_templates.LEVEL_NAMES,
@@ -192,12 +215,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--center-wave", type=int, default=0,
                    help="标准模板模式的中心波长号，0=自动使用主波长")
     p.add_argument("--comp-mode", default="无",
-                   help="标准模板模式的补偿器模式")
+                   help="标准模板/当前设置模式的补偿器模式")
+    p.add_argument("--save-worst-best", action="store_true",
+                   help="标准模板/当前设置模式下保存 Zemax Worst/Best case")
     return p
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.standard and args.current_settings:
+        print("错误：--standard 与 --current-settings 不能同时使用。", file=sys.stderr)
+        return 2
     if args.init_template:
         return _cmd_init_template(args)
     if args.read_only:

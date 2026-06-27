@@ -15,6 +15,7 @@ r"""gui.py —— 公差分析图形界面（PySide6，暗色主题）。
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import sys
 
@@ -162,13 +163,16 @@ class _Worker(QtCore.QObject):
     need_zos_dir = QtCore.Signal(list)
 
     def __init__(self, zmx: str, config: str, outdir: str, connect: str,
-                 standard_args: dict | None = None, zos_dir: str | None = None):
+                 standard_args: dict | None = None,
+                 current_args: dict | None = None,
+                 zos_dir: str | None = None):
         super().__init__()
         self._zmx = zmx
         self._config = config
         self._outdir = outdir
         self._connect = connect
         self._standard_args = standard_args or {}
+        self._current_args = current_args or {}
         self._zos_dir = zos_dir
         self._cancel = False
         self._force = False
@@ -209,7 +213,9 @@ class _Worker(QtCore.QObject):
             prep = pipeline.prepare_session(
                 self._zmx, config, outdir=self._outdir,
                 connect=self._connect, log=self.log.emit,
-                zos_dir=self._zos_dir)
+                zos_dir=self._zos_dir,
+                use_current_settings=bool(self._current_args),
+                current_args=self._current_args)
             sess = prep.sess
             self._sess = sess
 
@@ -251,16 +257,20 @@ class _Worker(QtCore.QObject):
                 ]
                 report_labels = [str(r.get("标签")).strip() for r in report_meta]
                 num_items = len(report_labels) + 1 if report_labels else None
+                comp_count = sum(
+                    1 for r in (prep.tde_meta or [])
+                    if str(r.get("操作数") or "").strip().upper() == "COMP")
                 if num_items:
                     run_log(
-                        f"ZTD 自动统计分项: {num_items} 项（自定义脚本 + {len(report_labels)} 个 REPORT）")
+                        f"ZTD 自动统计分项: {num_items + comp_count} 项（自定义脚本 + {len(report_labels)} 个 REPORT + {comp_count} 个 COMP）")
                 num_runs = _as_int(prep.rp.get("蒙特卡洛次数"), int(spec.num_runs))
                 run_log("正在读取 ZTD 并导出统计 Excel…")
                 zres = ztd_reader.read_ztd(
                     prep.sess.sys, result.ztd_path, num_runs=num_runs,
                     report_labels=report_labels or None,
                     num_items=num_items,
-                    report_meta=report_meta or None)
+                    report_meta=report_meta or None,
+                    tde_meta=prep.tde_meta or None)
                 if not zres.succeeded:
                     run_log("分析完成，但读取 ZTD 失败：" + zres.message)
                     self.finished.emit(False, "分析完成，但读取 ZTD 失败：" + zres.message)
@@ -328,6 +338,14 @@ class _ZtdWorker(QtCore.QObject):
                 r for r in cfg.report if _yes(r.get("启用")) and r.get("标签")
             ]
             report_labels = [str(r.get("标签")).strip() for r in report_meta]
+            tde_meta = None
+            run_config = os.path.join(os.path.dirname(os.path.abspath(self._ztd)), "run_config.json")
+            if os.path.isfile(run_config):
+                try:
+                    with open(run_config, "r", encoding="utf-8") as f:
+                        tde_meta = json.load(f).get("tde_meta") or None
+                except Exception:
+                    tde_meta = None
             num_runs = _as_int(cfg.run_params.get("蒙特卡洛次数"), 0)
             if num_runs <= 0:
                 self.finished.emit(False, "配置中的『蒙特卡洛次数』无效，无法确定 ZTD 数据行数。")
@@ -343,11 +361,14 @@ class _ZtdWorker(QtCore.QObject):
             else:
                 self.log.emit(f"已连接交互扩展: {sess.sys.SystemFile}")
 
+            num_items = len(report_labels) + 1 if report_labels else None
             self.log.emit(f"正在读取 ZTD: {self._ztd}")
             zres = ztd_reader.read_ztd(
                 sess.sys, self._ztd, num_runs=num_runs,
                 report_labels=report_labels or None,
-                report_meta=report_meta or None)
+                num_items=num_items,
+                report_meta=report_meta or None,
+                tde_meta=tde_meta)
             if not zres.succeeded:
                 self.finished.emit(False, zres.message or "读取 ZTD 失败")
                 return
@@ -415,6 +436,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_analysis_mode = QtWidgets.QComboBox()
         self.cb_analysis_mode.addItem("高级 Excel 配置", "excel")
         self.cb_analysis_mode.addItem("普通标准模板", "standard")
+        self.cb_analysis_mode.addItem("使用 Zemax 当前设置", "current")
         mode = self.cb_analysis_mode.findData(self._setting("analysis_mode", "excel"))
         if mode >= 0:
             self.cb_analysis_mode.setCurrentIndex(mode)
@@ -459,7 +481,8 @@ class MainWindow(QtWidgets.QMainWindow):
         std.addWidget(QtWidgets.QLabel("补偿"))
         std.addWidget(self.cb_comp)
         std.addWidget(self.chk_save_worst_best)
-        form.addWidget(QtWidgets.QLabel("标准模板："), 4, 0)
+        self.lb_standard_panel = QtWidgets.QLabel("标准模板：")
+        form.addWidget(self.lb_standard_panel, 4, 0)
         form.addWidget(self.standard_panel, 4, 1, 1, 2)
 
         form.addWidget(QtWidgets.QLabel("连接模式："), 5, 0)
@@ -585,16 +608,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings.setValue("standard_runs", self.sp_runs.value())
         self._settings.setValue("standard_save", self.sp_save.value())
         self._settings.setValue("standard_comp", self.cb_comp.currentText())
+        self._settings.setValue(
+            "standard_save_worst_best",
+            "Y" if self.chk_save_worst_best.isChecked() else "N")
 
     def _on_analysis_mode_changed(self):
-        use_standard = self.cb_analysis_mode.currentData() == "standard"
-        self.ed_config.setEnabled(not use_standard)
+        mode = self.cb_analysis_mode.currentData()
+        use_standard = mode == "standard"
+        use_current = mode == "current"
+        no_excel = use_standard or use_current
+        self.ed_config.setEnabled(not no_excel)
         if hasattr(self, "btn_pick_config"):
-            self.btn_pick_config.setEnabled(not use_standard)
+            self.btn_pick_config.setEnabled(not no_excel)
         if hasattr(self, "btn_export_std"):
             self.btn_export_std.setEnabled(use_standard)
-        self.standard_panel.setEnabled(use_standard)
-        self._settings.setValue("analysis_mode", self.cb_analysis_mode.currentData())
+        self.standard_panel.setEnabled(use_standard or use_current)
+        self.cb_std_template.setEnabled(use_standard)
+        self.cb_tol_level.setEnabled(use_standard)
+        if hasattr(self, "lb_standard_panel"):
+            self.lb_standard_panel.setText("标准模板：" if use_standard else "运行参数：")
+        self._settings.setValue("analysis_mode", mode)
 
     def _pick_zmx(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -688,24 +721,27 @@ class MainWindow(QtWidgets.QMainWindow):
         config = self.ed_config.text().strip()
         outdir = self.ed_outdir.text().strip()
         connect = self.cb_mode.currentData()
-        use_standard = self.cb_analysis_mode.currentData() == "standard"
+        mode = self.cb_analysis_mode.currentData()
+        use_standard = mode == "standard"
+        use_current = mode == "current"
 
         if not os.path.isfile(zmx):
             self._warn("zmx 文件不存在：\n" + zmx)
             return
-        if not use_standard and not os.path.isfile(config):
+        if not (use_standard or use_current) and not os.path.isfile(config):
             self._warn("Excel 配置不存在：\n" + config)
             return
         if not outdir:
             outdir = os.path.join(_HERE, "output")
         os.makedirs(outdir, exist_ok=True)
         self.ed_outdir.setText(outdir)
-        if use_standard and self.sp_save.value() > self.sp_runs.value():
-            self._warn("标准模板模式下，保存数量不能大于 MC 次数。")
+        if (use_standard or use_current) and self.sp_save.value() > self.sp_runs.value():
+            self._warn("保存数量不能大于 MC 次数。")
             return
         self._remember_form_paths()
 
         standard_args = self._standard_args_from_ui() if use_standard else None
+        current_args = self._standard_args_from_ui() if use_current else None
 
         self.log_view.clear()
         self._append_log(
@@ -718,12 +754,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"MC={standard_args['num_runs']} 保存={standard_args['num_to_save']} "
                 f"补偿={standard_args['comp_mode']} "
                 f"保存WC/BC={'Y' if standard_args['save_worst_best'] else 'N'}")
+        elif use_current:
+            self._append_log("分析模式: 使用 Zemax 当前设置")
+            self._append_log(
+                f"MC={current_args['num_runs']} 保存={current_args['num_to_save']} "
+                f"补偿={current_args['comp_mode']} "
+                f"保存WC/BC={'Y' if current_args['save_worst_best'] else 'N'}")
         else:
             self._append_log("分析模式: 高级 Excel 配置")
             self._append_log(f"配置 Excel: {config}")
         self._append_log(f"输出目录: {outdir}")
 
-        self._run_args = (zmx, config, outdir, connect, standard_args)
+        self._run_args = (zmx, config, outdir, connect, standard_args, current_args)
         self._active_task = "tol"
         self._start_worker(None)
 
@@ -761,7 +803,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._run_args:
             self._warn("尚未设置运行参数，请先点击「开始分析」。")
             return
-        zmx, config, outdir, connect, standard_args = self._run_args
+        zmx, config, outdir, connect, standard_args, current_args = self._run_args
         self._set_running(True)
         self._num_runs = 0
         self._num_to_save = 0
@@ -772,7 +814,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._thread = QtCore.QThread(self)
         self._worker = _Worker(
             zmx, config, outdir, connect,
-            standard_args=standard_args, zos_dir=zos_dir)
+            standard_args=standard_args,
+            current_args=current_args,
+            zos_dir=zos_dir)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.log.connect(self._append_log)
