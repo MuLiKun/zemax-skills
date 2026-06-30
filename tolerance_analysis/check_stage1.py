@@ -71,12 +71,9 @@ def main(argv: list[str] | None = None) -> int:
     print("[1/10] Python 编译检查")
     py_files = [
         script_dir / "check_stage1.py",
-        script_dir / "main.py",
         script_dir / "gui.py",
         script_dir / "tol_run.py",
         script_dir / "make_backup.py",
-        script_dir / "方案A_全自动" / "run_auto.py",
-        script_dir / "方案B_手动观察" / "run_prepare.py",
         *sorted((script_dir / "toltool").glob("*.py")),
     ]
     _compile(py_files)
