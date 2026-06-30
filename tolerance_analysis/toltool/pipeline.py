@@ -1,11 +1,7 @@
-"""pipeline.py —— 公差分析的可复用流程（两方案共享准备逻辑）。
+"""pipeline.py —— 公差分析的可复用流程。
 
-把「连接 → 建 TDE → 建 MFE → 建 TSC → Save」这段两方案完全相同的
-准备工作抽成 prepare_session()，避免方案A/方案B 两份入口重复维护：
-
-  方案A（全自动）：prepare_session() + run_montecarlo()，API 直接跑完。
-  方案B（手动）  ：只 prepare_session()，停下，由用户在 OpticStudio
-                  公差分析对话框选 TSC、点 Run，观察原生窗口实时进度。
+GUI 与命令行入口共享这里的核心流程：
+连接 → 建 TDE → 建 MFE → 建 TSC → Save → 跑蒙卡。
 """
 
 from __future__ import annotations
@@ -565,7 +561,7 @@ def log_run_plan(prep: Prepared, spec: tol_runner.RunSpec, log=print,
 
 def run_montecarlo(prep: Prepared, log=print,
                    export_stats: bool | None = None):
-    """方案A：API 直接跑完蒙特卡洛。返回 RunResult。"""
+    """通过 Zemax API 直接跑完蒙特卡洛。返回 RunResult。"""
     spec = make_runspec(prep)
     log_run_plan(prep, spec, log=log, export_stats=export_stats)
     log(f"开始公差分析：{spec.num_runs} 次蒙特卡洛（{spec.distribution}分布）…")
