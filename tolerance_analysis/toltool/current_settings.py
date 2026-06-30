@@ -15,6 +15,7 @@ import re
 from openpyxl import load_workbook
 
 from . import excel_io
+from .field_mapping import build_field_items, report_label as _field_report_label
 
 _FIELD_SMALL_OPS = {"RSCE", "RWCE", "GENC"}
 _FIELD_LARGE_OPS = {"GMTT", "GMTS", "GMTA", "MTFT", "MTFS", "MTFA"}
@@ -82,12 +83,45 @@ def _unit(op: str) -> str:
     return ""
 
 
+def _field_normalized_by_no(fields_by_no: dict[int, float], value) -> float | None:
+    try:
+        field_no = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return fields_by_no.get(field_no)
+
+
+def _report_label(op: str, line_no: int, item: dict,
+                  fields_by_no: dict[int, float]) -> str:
+    target = None
+    if op in _FIELD_LARGE_OPS or op == "GENC":
+        target = _field_normalized_by_no(fields_by_no, item.get("Param3"))
+    elif op in {"RSCE", "RWCE"}:
+        try:
+            target = float(item.get("Param4"))
+        except (TypeError, ValueError):
+            target = None
+    if target is not None:
+        return f"{op}_{_field_report_label(target)}"
+    return f"{op}_{line_no}"
+
+
+def _current_field_normalized_map(zos_system) -> dict[int, float]:
+    fields = zos_system.SystemData.Fields
+    items = build_field_items([
+        (float(fields.GetField(i).X), float(fields.GetField(i).Y))
+        for i in range(1, fields.NumberOfFields + 1)
+    ])
+    return {item.field_no: item.normalized for item in items}
+
+
 def read_current_mfe(zos_system) -> tuple[list[dict], list[dict]]:
     """读取当前 MFE 有效行，返回 (mfe_rows, report_rows)。"""
     import ZOSAPI
 
     mfe = zos_system.MFE
     merit_column = ZOSAPI.Editors.MFE.MeritColumn
+    fields_by_no = _current_field_normalized_map(zos_system)
     rows: list[dict] = []
     report: list[dict] = []
 
@@ -109,10 +143,23 @@ def read_current_mfe(zos_system) -> tuple[list[dict], list[dict]]:
         }
         for name in _PARAM_COLS:
             item[name] = _cell_value(row, merit_column, name)
+        if op in _FIELD_LARGE_OPS or op == "GENC":
+            target = _field_normalized_by_no(fields_by_no, item.get("Param3"))
+        elif op in {"RSCE", "RWCE"}:
+            try:
+                target = float(item.get("Param4"))
+            except (TypeError, ValueError):
+                target = None
+        else:
+            target = None
+        if target is not None:
+            item["目标归一化视场"] = target
+            item["归一化视场"] = target
+            item["视场映射说明"] = "当前设置模式按视场号反推"
         rows.append(item)
         report.append({
             "启用": "Y",
-            "标签": f"{op}_{line_no}",
+            "标签": _report_label(op, line_no, item, fields_by_no),
             "MF行号": line_no,
             "方向": _direction(op),
             "单位": _unit(op),
