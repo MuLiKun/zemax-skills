@@ -298,8 +298,8 @@ class _Worker(QtCore.QObject):
                 try:
                     sess.close()
                     self.log.emit("已释放 Zemax 独立实例。")
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log.emit(f"释放 Zemax 独立实例时出错（已忽略）: {type(e).__name__}: {e}")
             self._sess = None
 
 
@@ -390,8 +390,8 @@ class _ZtdWorker(QtCore.QObject):
                 try:
                     sess.close()
                     self.log.emit("已释放 Zemax 独立实例。")
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log.emit(f"释放 Zemax 独立实例时出错（已忽略）: {type(e).__name__}: {e}")
             self._sess = None
 
 
@@ -878,7 +878,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.stop()
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait()
+            self._thread.wait(5000)
             self._thread = None
         self._worker = None
         self._set_running(False)
@@ -900,7 +900,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.stop()
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait()
+            self._thread.wait(5000)
             self._thread = None
         self._worker = None
         self._set_running(False)
@@ -920,7 +920,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.stop()
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait()
+            self._thread.wait(5000)
             self._thread = None
         self._worker = None
         self._set_running(False)
