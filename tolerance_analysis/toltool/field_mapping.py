@@ -97,13 +97,12 @@ def _read_fields(zos_system) -> list[tuple[float, float]]:
     ]
 
 
-def _normalize_value(x: float, y: float, max_abs_y: float, max_row: tuple[float, float, float] | None) -> float:
+def _normalize_value(x: float, y: float, max_abs_x: float, max_abs_y: float) -> float:
     if max_abs_y > 0 and abs(y) >= abs(x):
         return y / max_abs_y
-    if max_row is None or max_row[2] <= 0:
-        return 0.0
-    max_x, max_y, max_abs = max_row
-    return (x * max_x + y * max_y) / (max_abs * max_abs)
+    if max_abs_x > 0:
+        return x / max_abs_x
+    return 0.0
 
 
 def build_field_items(fields_xy: list[tuple[float, float]]) -> list[FieldItem]:
@@ -112,15 +111,15 @@ def build_field_items(fields_xy: list[tuple[float, float]]) -> list[FieldItem]:
         x = float(x)
         y = float(y)
         raw.append((i, x, y, math.hypot(x, y)))
+    max_abs_x = max((abs(r[1]) for r in raw), default=0.0)
     max_abs_y = max((abs(r[2]) for r in raw), default=0.0)
-    max_row = max(((r[1], r[2], r[3]) for r in raw), key=lambda r: r[2], default=None)
     rows = [
         FieldItem(
             field_no=i,
             x=x,
             y=y,
             field_abs=field_abs,
-            normalized=_normalize_value(x, y, max_abs_y, max_row),
+            normalized=_normalize_value(x, y, max_abs_x, max_abs_y),
         )
         for i, x, y, field_abs in raw
     ]
