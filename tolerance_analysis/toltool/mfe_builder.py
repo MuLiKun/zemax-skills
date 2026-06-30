@@ -84,7 +84,11 @@ def save_mf(zos_system, mf_path: str) -> str:
 
 def default_mf_path(zos_system, base_name: str) -> str:
     """返回 <DataDir>\\MeritFunction\\<base_name>.MF 路径。"""
-    mf_dir = zos_system.MFE.MeritFunctionDirectory
+    mf_dir = str(zos_system.MFE.MeritFunctionDirectory or "").strip()
+    if not mf_dir:
+        raise RuntimeError(
+            "无法从 Zemax 读取 MeritFunctionDirectory（返回空），"
+            "无法定位 .MF 保存目录。请确认已连接 Zemax 并打开镜头。")
     if not base_name.lower().endswith(".mf"):
         base_name += ".MF"
     return os.path.join(mf_dir, base_name)
