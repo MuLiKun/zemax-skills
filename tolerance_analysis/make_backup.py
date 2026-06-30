@@ -9,7 +9,6 @@ from pathlib import Path
 
 DEFAULT_ITEMS = [
     "README.md",
-    "tolerance_analysis/main.py",
     "tolerance_analysis/gui.py",
     "tolerance_analysis/tol_run.py",
     "tolerance_analysis/check_stage1.py",
@@ -18,8 +17,6 @@ DEFAULT_ITEMS = [
     "tolerance_analysis/zemax_config.ini.example",
     "tolerance_analysis/tol_config_模板.xlsx",
     "tolerance_analysis/toltool",
-    "tolerance_analysis/方案A_全自动",
-    "tolerance_analysis/方案B_手动观察",
     "tolerance_analysis/公差分析程序_使用说明.md",
     "tolerance_analysis/公差分析程序_需求文档.md",
     "tolerance_analysis/公差分析工具_泛化需求文档.md",
