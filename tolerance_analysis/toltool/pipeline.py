@@ -257,7 +257,7 @@ def _fill_auto_standard_surfaces(zos_system, cfg, rp: dict, log=print) -> None:
         return
     try:
         end_surface = max(1, int(zos_system.LDE.NumberOfSurfaces) - 2)
-    except Exception as e:
+    except (AttributeError, TypeError, ValueError) as e:
         log(f"自动读取镜头面数失败，保留 Excel 中的公差范围: {e}")
         return
     changed = False
@@ -471,7 +471,7 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
     optimize_cycles = _as_int(rp.get("TSC优化周期"), 4)
     n_report, tsc_path = tsc_builder.build_and_write(
         sess.sys, cfg.report, mf_name, base, optimize_cycles=optimize_cycles,
-        comp_mode=comp_mode, comp_mf_name=comp_mf_name)
+        comp_mode=comp_mode, comp_mf_name=comp_mf_name, log=log)
     log(f"已生成 TSC: {n_report} 个 REPORT 分项  → {tsc_path}")
 
     tde_meta = _read_tde_meta(sess.sys)
