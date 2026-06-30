@@ -219,6 +219,14 @@ class Config:
 
 
 def _read_sheet_rows(ws: Worksheet, header: list[str]) -> list[dict]:
+    actual_cols = sum(
+        1 for i in range(1, len(header) + 1)
+        if str(ws.cell(row=1, column=i).value or "").strip())
+    if actual_cols < len(header):
+        raise ValueError(
+            f"工作表 {ws.title!r} 的表头列数不足：期望 {len(header)} 列"
+            f"（{', '.join(header)}），实际仅 {actual_cols} 列。"
+            f"请使用最新模板或补全表头。")
     rows: list[dict] = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         if row is None or all(v is None or v == "" for v in row):
