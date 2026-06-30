@@ -315,8 +315,13 @@ def apply_detail_to_tde(zos_system, detail_rows: list[dict]) -> int:
         op_enum = getattr(T, op, None)
         if op_enum is None:
             raise ValueError(f"TDE 不支持的操作数: {op}（明细）")
-        s1 = int(_num(row.get("面1"), 0))
-        s2 = int(_num(row.get("面2"), 0))
+        try:
+            s1 = int(_num(row.get("面1"), 0))
+            s2 = int(_num(row.get("面2"), 0))
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"公差明细 {op} 行的 面1/面2 不是有效数字："
+                f"面1={row.get('面1')!r}，面2={row.get('面2')!r}。原始错误：{e}") from e
         if op not in PAIRED_OPS:
             s2 = 0
 
@@ -327,8 +332,13 @@ def apply_detail_to_tde(zos_system, detail_rows: list[dict]) -> int:
                 changed += 1
             continue
 
-        vmin = _num(row.get("Min"), 0.0)
-        vmax = _num(row.get("Max"), 0.0)
+        try:
+            vmin = _num(row.get("Min"), 0.0)
+            vmax = _num(row.get("Max"), 0.0)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"公差明细 {op} 行的 Min/Max 不是有效数字："
+                f"Min={row.get('Min')!r}，Max={row.get('Max')!r}。原始错误：{e}") from e
         comment = str(row.get("注释") or "")
 
         if action in ("覆盖", "override", "OVERRIDE", "覆盖向导"):
