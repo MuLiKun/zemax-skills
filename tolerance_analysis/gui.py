@@ -64,6 +64,14 @@ def _as_int(v, default: int) -> int:
         return default
 
 
+def _resolve_ztd_config(ztd: str, fallback_config: str) -> tuple[str, str]:
+    ztd_dir = os.path.dirname(os.path.abspath(ztd))
+    used_excel = os.path.join(ztd_dir, "used_excel.xlsx")
+    if os.path.isfile(used_excel):
+        return used_excel, "ZTD 同目录 used_excel.xlsx"
+    return fallback_config, "界面选择的 Excel"
+
+
 def _apply_dark_titlebar(widget: QtWidgets.QWidget) -> None:
     """Windows 下把窗口标题栏改成深色（DWM 沉浸式暗色模式）。
 
@@ -332,8 +340,12 @@ class _ZtdWorker(QtCore.QObject):
         try:
             from toltool import excel_io, ztd_reader
 
-            self.log.emit(f"读取配置 Excel: {self._config}")
-            cfg = excel_io.read_config(self._config)
+            config_path, config_source = _resolve_ztd_config(self._ztd, self._config)
+            self.log.emit(f"读取配置 Excel: {config_path}")
+            self.log.emit(f"配置来源: {config_source}")
+            if config_path != self._config:
+                self.log.emit(f"已忽略界面选择的 Excel: {self._config}")
+            cfg = excel_io.read_config(config_path)
             report_meta = [
                 r for r in cfg.report if _yes(r.get("启用")) and r.get("标签")
             ]
@@ -784,18 +796,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if os.path.splitext(ztd)[1].lower() != ".ztd":
             self._warn("请选择 .ZTD 公差数据文件：\n" + ztd)
             return
-        if not os.path.isfile(config):
-            self._warn("Excel 配置不存在：\n" + config)
+        config_path, config_source = _resolve_ztd_config(ztd, config)
+        if not os.path.isfile(config_path):
+            self._warn("Excel 配置不存在：\n" + config_path)
             return
         self._remember_form_paths()
 
         self.log_view.clear()
         self._append_log("开始独立分析已有 ZTD。")
         self._append_log(f"ZTD 文件: {ztd}")
-        self._append_log(f"配置 Excel: {config}")
+        self._append_log(f"配置 Excel: {config_path}")
+        self._append_log(f"配置来源: {config_source}")
+        if config_path != config:
+            self._append_log(f"已忽略界面选择的 Excel: {config}")
         self._append_log(f"统计输出目录: {os.path.dirname(os.path.abspath(ztd))}")
 
-        self._ztd_args = (ztd, config, connect)
+        self._ztd_args = (ztd, config_path, connect)
         self._active_task = "ztd"
         self._start_ztd_worker(None)
 
