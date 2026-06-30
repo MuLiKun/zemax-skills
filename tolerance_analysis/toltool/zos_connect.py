@@ -302,11 +302,8 @@ class ZosSession:
         waves = sd.Wavelengths
         wl = [float(waves.GetWavelength(i).Wavelength)
               for i in range(1, waves.NumberOfWavelengths + 1)]
-        primary = int(waves.GetWavelength(1).Wavelength and waves.NumberOfWavelengths)
-        try:
-            primary = int(sd.Wavelengths.GetWavelength(1).IsPrimary and 1) or 0
-        except Exception:
-            primary = 0
+        
+        primary = 0
         for i in range(1, waves.NumberOfWavelengths + 1):
             if waves.GetWavelength(i).IsPrimary:
                 primary = i
