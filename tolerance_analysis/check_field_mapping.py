@@ -41,28 +41,27 @@ def _sort_key_normalized(value: float) -> tuple[float, int, float]:
     return (abs(value), 0 if value < 0 else 1, value)
 
 
-def _normalize_value(x: float, y: float, max_abs_y: float, max_row: tuple[float, float, float] | None) -> float:
+def _normalize_value(x: float, y: float, max_abs_x: float, max_abs_y: float) -> float:
     if max_abs_y > 0 and abs(y) >= abs(x):
         return y / max_abs_y
-    if max_row is None or max_row[2] <= 0:
-        return 0.0
-    max_x, max_y, max_abs = max_row
-    return (x * max_x + y * max_y) / (max_abs * max_abs)
+    if max_abs_x > 0:
+        return x / max_abs_x
+    return 0.0
 
 
 def build_mapping(fields: list[tuple[float, float]]) -> list[FieldRow]:
     raw = []
     for i, (x, y) in enumerate(fields, start=1):
         raw.append((i, float(x), float(y), math.hypot(float(x), float(y))))
+    max_abs_x = max((abs(r[1]) for r in raw), default=0.0)
     max_abs_y = max((abs(r[2]) for r in raw), default=0.0)
-    max_row = max(((r[1], r[2], r[3]) for r in raw), key=lambda r: r[2], default=None)
     rows = [
         FieldRow(
             field_no=i,
             x=x,
             y=y,
             field_abs=field_abs,
-            normalized=_normalize_value(x, y, max_abs_y, max_row),
+            normalized=_normalize_value(x, y, max_abs_x, max_abs_y),
         )
         for i, x, y, field_abs in raw
     ]
@@ -75,15 +74,6 @@ def _nearest(rows: list[FieldRow], target: float) -> FieldRow | None:
     return min(rows, key=lambda r: (abs(r.normalized - target), r.field_no))
 
 
-def _max_field_vector(rows: list[FieldRow]) -> FieldRow | None:
-    if not rows:
-        return None
-    positive_edge = min(rows, key=lambda r: (abs(r.normalized - 1.0), r.field_no))
-    if abs(positive_edge.normalized - 1.0) <= 0.05:
-        return positive_edge
-    return max(rows, key=lambda r: (r.field_abs, r.field_no))
-
-
 def _suggest_insert_xy(rows: list[FieldRow], target: float) -> tuple[float, float] | None:
     if not rows:
         return None
@@ -93,10 +83,8 @@ def _suggest_insert_xy(rows: list[FieldRow], target: float) -> tuple[float, floa
         return 0.0, target * max_abs_y
     if max_abs_x > 0 and max_abs_x > max_abs_y:
         return target * max_abs_x, 0.0
-    max_row = _max_field_vector(rows)
-    if max_row is None:
-        return None
-    return max_row.x * target, max_row.y * target
+    edge = max(rows, key=lambda r: (r.field_abs, r.field_no))
+    return edge.x * target, edge.y * target
 
 
 def _report_label(target: float) -> str:
