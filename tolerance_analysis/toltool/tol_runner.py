@@ -376,11 +376,16 @@ def run(zos_system, spec: RunSpec, progress_cb=None, cancel_flag=None,
                 seen.add(key)
                 candidates.append(c)
             ztd_candidates = candidates
-            for c in ztd_candidates:
+            emit(95, f"正在查找 ZTD 文件（候选路径 {len(ztd_candidates)} 个）…")
+            for i, c in enumerate(ztd_candidates, start=1):
+                emit(95, f"  [{i}/{len(ztd_candidates)}] 检查: {c}")
                 if os.path.isfile(c):
                     actual_ztd = c
                     ztd_found = True
+                    emit(98, f"  ✓ 找到 ZTD: {c}")
                     break
+            if not ztd_found and ztd_candidates:
+                emit(0, f"  ✗ 未在 {len(ztd_candidates)} 个候选路径中找到 ZTD")
 
         zemax_status = "\n".join(result_lines)
         msg = "" if ok else (_tool_error_message(tol) + f"\nZemax工具状态：\n{zemax_status}")
