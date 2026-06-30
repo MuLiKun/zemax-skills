@@ -527,11 +527,13 @@ def format_table(result: ZtdResult) -> str:
 def export_excel(result: ZtdResult, path: str) -> str:
     if not result.succeeded:
         raise RuntimeError(result.message or "ZTD 读取失败，无法导出统计 Excel")
+    if not result.items:
+        raise RuntimeError("ZTD 读取成功但无统计项，无法导出 Excel")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     wb = Workbook()
     ws = wb.active
     ws.title = "ZTD统计"
-    max_samples = max([len(it.samples) for it in result.items] or [result.num_runs])
+    max_samples = max((len(it.samples) for it in result.items), default=result.num_runs)
     headers = ["项目"] + [it.label for it in result.items]
     header_fill = PatternFill("solid", fgColor="DDEBF7")
     stat_fill = PatternFill("solid", fgColor="FFF2CC")
