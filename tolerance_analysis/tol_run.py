@@ -5,8 +5,7 @@
   --read-only      连接 Zemax，读取并打印镜头信息（不跑分析）
   (默认)           读配置 → 建 TDE/MFE/TSC → 跑蒙卡 → 读 ZTD 出统计
 
-准备与跑蒙卡的逻辑统一由 toltool.pipeline 提供（与方案A/方案B 共享
-单一来源），本文件在其上补充 ZTD 读取与命令行参数解析。
+准备与跑蒙卡的逻辑统一由 toltool.pipeline 提供，本文件在其上补充 ZTD 读取与命令行参数解析。
 """
 
 from __future__ import annotations
