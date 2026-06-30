@@ -86,7 +86,11 @@ def tsc_dir(zos_system) -> str:
     实测：TDE 无 ToleranceDirectory 属性；数据根目录可由
     MFE.MeritFunctionDirectory 的父目录得到（= App.ZemaxDataDir）。
     """
-    mf_dir = zos_system.MFE.MeritFunctionDirectory
+    mf_dir = str(zos_system.MFE.MeritFunctionDirectory or "").strip()
+    if not mf_dir:
+        raise RuntimeError(
+            "无法从 Zemax 读取 MeritFunctionDirectory（返回空），"
+            "无法定位 Tolerance 目录。请确认已连接 Zemax 并打开镜头。")
     data_dir = os.path.dirname(mf_dir.rstrip("\\/"))
     d = os.path.join(data_dir, "Tolerance")
     os.makedirs(d, exist_ok=True)
@@ -99,11 +103,12 @@ def default_tsc_path(zos_system, base_name: str) -> str:
     return os.path.join(tsc_dir(zos_system), base_name)
 
 
-def write_tsc(lines: list[str], tsc_path: str) -> str:
+def write_tsc(lines: list[str], tsc_path: str, log=None) -> str:
     """写 TSC 文件。
 
     目标文件可能被 OpticStudio 瞬时占用（刚 Save 同名镜头时），
     遇 PermissionError 短暂重试，仍失败则回退到带 _api 后缀的新文件名。
+    回退改名时通过 log 回调提示（若提供），避免调用方对路径变更无感知。
     """
     import time
     text = "\n".join(lines) + "\n"
@@ -125,20 +130,23 @@ def write_tsc(lines: list[str], tsc_path: str) -> str:
     alt = root + "_api" + ext
     try:
         _do_write(alt)
+        if log is not None:
+            log(f"TSC 目标文件被占用，已回退保存为: {alt}")
         return alt
     except PermissionError:
-        raise last_err
+        raise last_err if last_err is not None else PermissionError(tsc_path)
 
 
 
 def build_and_write(zos_system, report_rows: list[dict], mf_name: str,
                     base_name: str, optimize_cycles: int = 4,
                     comp_mode: str = "无",
-                    comp_mf_name: str | None = None) -> tuple[int, str]:
+                    comp_mf_name: str | None = None,
+                    log=None) -> tuple[int, str]:
     """生成并写出 TSC。返回 (REPORT 条数, TSC 路径)。"""
     lines = build_tsc_lines(report_rows, mf_name, optimize_cycles,
                             comp_mode=comp_mode, comp_mf_name=comp_mf_name)
     path = default_tsc_path(zos_system, base_name)
-    write_tsc(lines, path)
+    actual = write_tsc(lines, path, log=log)
     n_report = sum(1 for ln in lines if ln.startswith("REPORT"))
-    return n_report, path
+    return n_report, actual
