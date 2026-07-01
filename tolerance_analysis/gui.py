@@ -18,6 +18,7 @@ import ctypes
 import json
 import os
 import sys
+import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
@@ -407,6 +408,77 @@ class _ZtdWorker(QtCore.QObject):
             self._sess = None
 
 
+class _FieldPreviewWorker(QtCore.QObject):
+
+    log = QtCore.Signal(str)
+    finished = QtCore.Signal(bool, str)
+    need_zos_dir = QtCore.Signal(list)
+
+    def __init__(self, zmx: str, run_params: dict, connect: str,
+                 zos_dir: str | None = None):
+        super().__init__()
+        self._zmx = zmx
+        self._run_params = run_params
+        self._connect = connect
+        self._zos_dir = zos_dir
+        self._sess = None
+
+    def force_stop(self) -> None:
+        sess = self._sess
+        if sess is not None and self._connect == "standalone":
+            try:
+                sess.close()
+            except Exception:
+                pass
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        sess = None
+        tmp_dir = None
+        try:
+            from toltool import field_mapping
+
+            self.log.emit(f"连接模式: {'Standalone' if self._connect == 'standalone' else 'GUI(交互扩展)'}")
+            sess = zos_connect.ZosSession(zos_dir=self._zos_dir)
+            self._sess = sess
+            self.log.emit(f"ZOS 目录: {sess.zos_dir}")
+            sess.connect(mode=self._connect)
+            if self._connect == "standalone":
+                self.log.emit("已启动 Zemax 独立实例（用于预览视场映射）")
+                tmp_dir = tempfile.TemporaryDirectory(prefix="zemax_field_preview_")
+                copy_path = os.path.join(tmp_dir.name, os.path.basename(self._zmx))
+                self.log.emit(f"预览工作副本: {sess.open_as_copy(self._zmx, copy_path=copy_path)}")
+            else:
+                self.log.emit(f"已连接交互扩展: {sess.sys.SystemFile}")
+                self.log.emit(
+                    "提示：交互扩展模式的预览基于 OpticStudio 当前打开的文件，"
+                    "而非界面所选 zmx；如需预览指定文件请改用 Standalone 模式。")
+            result = field_mapping.preview(
+                sess.sys, self._run_params,
+                simulate_insert=self._connect == "standalone")
+            if not result.enabled:
+                self.log.emit("视场映射：未启用")
+            else:
+                for line in pipeline.field_mapping_report_lines(result):
+                    if line:
+                        self.log.emit(line)
+            self.finished.emit(True, "视场映射预览完成")
+        except zos_connect.ZosDirNotFound as e:
+            self.need_zos_dir.emit(list(e.searched))
+        except Exception as e:
+            self.finished.emit(False, f"{type(e).__name__}: {e}")
+        finally:
+            if sess is not None and self._connect == "standalone":
+                try:
+                    sess.close()
+                    self.log.emit("已释放 Zemax 独立实例。")
+                except Exception as e:
+                    self.log.emit(f"释放 Zemax 独立实例时出错（已忽略）: {type(e).__name__}: {e}")
+            if tmp_dir is not None:
+                tmp_dir.cleanup()
+            self._sess = None
+
+
 class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
@@ -417,6 +489,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker = None
         self._run_args = None
         self._ztd_args = None
+        self._field_preview_args = None
         self._active_task = ""
         self._settings = QtCore.QSettings(SETTINGS_ORG, SETTINGS_APP)
 
@@ -482,15 +555,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cb_comp.setCurrentIndex(idx)
         self.chk_save_worst_best = QtWidgets.QCheckBox("保存 WC/BC")
         self.chk_save_worst_best.setChecked(_yes(self._setting("standard_save_worst_best", "N")))
-        std.addWidget(QtWidgets.QLabel("模板"))
+        self.lb_std_template = QtWidgets.QLabel("模板")
+        self.lb_tol_level = QtWidgets.QLabel("等级")
+        self.lb_runs = QtWidgets.QLabel("MC")
+        self.lb_save = QtWidgets.QLabel("保存")
+        self.lb_comp = QtWidgets.QLabel("补偿")
+        std.addWidget(self.lb_std_template)
         std.addWidget(self.cb_std_template, 2)
-        std.addWidget(QtWidgets.QLabel("等级"))
+        std.addWidget(self.lb_tol_level)
         std.addWidget(self.cb_tol_level)
-        std.addWidget(QtWidgets.QLabel("MC"))
+        std.addWidget(self.lb_runs)
         std.addWidget(self.sp_runs)
-        std.addWidget(QtWidgets.QLabel("保存"))
+        std.addWidget(self.lb_save)
         std.addWidget(self.sp_save)
-        std.addWidget(QtWidgets.QLabel("补偿"))
+        std.addWidget(self.lb_comp)
         std.addWidget(self.cb_comp)
         std.addWidget(self.chk_save_worst_best)
         self.lb_standard_panel = QtWidgets.QLabel("标准模板：")
@@ -510,20 +588,28 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addWidget(self.cb_mode, 5, 1, 1, 2)
 
         self.ed_ztd = QtWidgets.QLineEdit(self._setting("ztd", ""))
-        self._add_file_row(form, 6, "已有 ZTD：", self.ed_ztd,
-                           self._pick_ztd)
+        self.btn_pick_ztd = self._add_file_row(form, 6, "已有 ZTD：", self.ed_ztd,
+                                               self._pick_ztd)
 
-        ztdbar = QtWidgets.QHBoxLayout()
+        self.ztd_panel = QtWidgets.QWidget()
+        ztdbar = QtWidgets.QHBoxLayout(self.ztd_panel)
+        ztdbar.setContentsMargins(0, 0, 0, 0)
         ztdbar.addStretch(1)
         self.btn_ztd = QtWidgets.QPushButton("分析已有 ZTD")
         self.btn_ztd.clicked.connect(self._on_analyze_ztd)
         ztdbar.addWidget(self.btn_ztd)
-        root.addLayout(ztdbar)
+        root.addWidget(self.ztd_panel)
 
         btns = QtWidgets.QHBoxLayout()
         btns.addStretch(1)
         self.btn_export_std = QtWidgets.QPushButton("导出标准配置")
         self.btn_export_std.clicked.connect(self._on_export_standard_config)
+        self.btn_check_config = QtWidgets.QPushButton("检查配置")
+        self.btn_check_config.clicked.connect(self._on_check_config)
+        self.btn_preview_fields = QtWidgets.QPushButton("预览视场映射")
+        self.btn_preview_fields.clicked.connect(self._on_preview_field_mapping)
+        self.btn_open_result = QtWidgets.QPushButton("打开结果目录")
+        self.btn_open_result.clicked.connect(self._on_open_result_dir)
         self.btn_run = QtWidgets.QPushButton("开始分析")
         self.btn_run.setObjectName("run")
         self.btn_run.clicked.connect(self._on_run)
@@ -531,6 +617,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
         btns.addWidget(self.btn_export_std)
+        btns.addWidget(self.btn_check_config)
+        btns.addWidget(self.btn_preview_fields)
+        btns.addWidget(self.btn_open_result)
         btns.addWidget(self.btn_cancel)
         btns.addWidget(self.btn_run)
         root.addLayout(btns)
@@ -572,12 +661,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage("就绪")
 
     def _add_file_row(self, grid, row, label, edit, slot):
-        grid.addWidget(QtWidgets.QLabel(label), row, 0)
+        lb = QtWidgets.QLabel(label)
+        grid.addWidget(lb, row, 0)
         grid.addWidget(edit, row, 1)
         btn = QtWidgets.QPushButton("浏览…")
         btn.clicked.connect(slot)
         grid.addWidget(btn, row, 2)
+        btn._row_label = lb
+        btn._row_edit = edit
         return btn
+
+    def _set_file_row_visible(self, btn: QtWidgets.QPushButton, visible: bool) -> None:
+        btn.setVisible(visible)
+        getattr(btn, "_row_label").setVisible(visible)
+        getattr(btn, "_row_edit").setVisible(visible)
 
     def _setting(self, key: str, default: str = "") -> str:
         return str(self._settings.value(key, default) or "")
@@ -626,18 +723,32 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_analysis_mode_changed(self):
         mode = self.cb_analysis_mode.currentData()
+        use_excel = mode == "excel"
         use_standard = mode == "standard"
         use_current = mode == "current"
-        no_excel = use_standard or use_current
-        self.ed_config.setEnabled(not no_excel)
         if hasattr(self, "btn_pick_config"):
-            self.btn_pick_config.setEnabled(not no_excel)
+            self._set_file_row_visible(self.btn_pick_config, use_excel)
+            # config 行仅高级 Excel 模式可见；可见时确保恢复可用（运行态可能临时禁用过）。
+            self.ed_config.setEnabled(use_excel)
         if hasattr(self, "btn_export_std"):
+            self.btn_export_std.setVisible(use_standard)
             self.btn_export_std.setEnabled(use_standard)
+        if hasattr(self, "btn_check_config"):
+            self.btn_check_config.setVisible(use_excel)
+            self.btn_check_config.setEnabled(use_excel)
+        if hasattr(self, "btn_preview_fields"):
+            self.btn_preview_fields.setVisible(not use_current)
+            self.btn_preview_fields.setEnabled(not use_current)
+        self.standard_panel.setVisible(use_standard or use_current)
         self.standard_panel.setEnabled(use_standard or use_current)
+        self.cb_std_template.setVisible(use_standard)
+        self.lb_std_template.setVisible(use_standard)
+        self.cb_tol_level.setVisible(use_standard)
+        self.lb_tol_level.setVisible(use_standard)
         self.cb_std_template.setEnabled(use_standard)
         self.cb_tol_level.setEnabled(use_standard)
         if hasattr(self, "lb_standard_panel"):
+            self.lb_standard_panel.setVisible(use_standard or use_current)
             self.lb_standard_panel.setText("标准模板：" if use_standard else "运行参数：")
         self._settings.setValue("analysis_mode", mode)
 
@@ -687,6 +798,106 @@ class MainWindow(QtWidgets.QMainWindow):
             "save_worst_best": self.chk_save_worst_best.isChecked(),
         }
 
+    def _current_args_from_ui(self) -> dict:
+        args = self._standard_args_from_ui()
+        args["report_filter"] = "all"
+        return args
+
+    def _config_from_current_form(self):
+        zmx = self.ed_zmx.text().strip()
+        config = self.ed_config.text().strip()
+        mode = self.cb_analysis_mode.currentData()
+        use_standard = mode == "standard"
+        use_current = mode == "current"
+        if not os.path.isfile(zmx):
+            raise ValueError("运行前校验失败：\n- ZMX 文件不存在：" + zmx)
+        if use_current:
+            return None
+        if use_standard:
+            if self.sp_save.value() > self.sp_runs.value():
+                raise ValueError("运行前校验失败：\n- 保存数量不能大于 MC 次数")
+            cfg = standard_templates.build_config(
+                zmx,
+                template=self.cb_std_template.currentText(),
+                level=self.cb_tol_level.currentText(),
+                num_runs=self.sp_runs.value(),
+                num_to_save=self.sp_save.value(),
+                center_wave=0,
+                comp_mode=self.cb_comp.currentText(),
+                save_worst_best=self.chk_save_worst_best.isChecked())
+            return pipeline.validate_config_data(cfg)
+        return pipeline.validate_config(zmx, config)
+
+    def _validate_current_form(self) -> list[str]:
+        mode = self.cb_analysis_mode.currentData()
+        if mode == "current":
+            zmx = self.ed_zmx.text().strip()
+            if not os.path.isfile(zmx):
+                raise ValueError("运行前校验失败：\n- ZMX 文件不存在：" + zmx)
+            return [
+                "当前设置模式：已校验 zmx 路径；MFE/TDE 需连接 Zemax 后运行期读取。",
+            ]
+        cfg = self._config_from_current_form()
+        if mode == "standard":
+            return [
+                "标准模板配置校验通过。",
+                f"评价函数有效行数: {len([r for r in cfg.mfe if str(r.get('操作数') or '').strip()])}",
+                f"REPORT 启用行数: {len([r for r in cfg.report if _yes(r.get('启用'))])}",
+            ]
+        return [
+            "Excel 配置校验通过。",
+            f"配置 Excel: {self.ed_config.text().strip()}",
+            f"评价函数有效行数: {len([r for r in cfg.mfe if str(r.get('操作数') or '').strip()])}",
+            f"REPORT 启用行数: {len([r for r in cfg.report if _yes(r.get('启用'))])}",
+        ]
+
+    def _on_check_config(self):
+        if self._thread is not None and self._thread.isRunning():
+            self._warn("当前已有任务正在运行，请等待结束后再检查配置。")
+            return
+        try:
+            lines = self._validate_current_form()
+        except Exception as e:
+            self._append_log("❌ 配置检查失败：" + str(e))
+            self.statusBar().showMessage("配置检查失败", 3000)
+            self._warn("配置检查失败：\n" + str(e))
+            return
+        self._remember_form_paths()
+        self.log_view.clear()
+        self._append_log("配置检查通过。")
+        for line in lines:
+            self._append_log(line)
+        self.statusBar().showMessage("配置检查通过", 3000)
+
+    def _on_preview_field_mapping(self):
+        if self._thread is not None and self._thread.isRunning():
+            self._warn("当前已有任务正在运行，请等待结束后再预览视场映射。")
+            return
+        zmx = self.ed_zmx.text().strip()
+        connect = self.cb_mode.currentData()
+        mode = self.cb_analysis_mode.currentData()
+        if mode == "current":
+            self._warn("当前设置模式的视场/MFE/REPORT 会在连接 Zemax 后按当前文件读取，暂不支持单独预览视场映射。")
+            return
+        try:
+            cfg = self._config_from_current_form()
+        except Exception as e:
+            self._append_log("❌ 视场映射预览前检查失败：" + str(e))
+            self.statusBar().showMessage("预览前检查失败", 3000)
+            self._warn("视场映射预览前检查失败：\n" + str(e))
+            return
+        self._remember_form_paths()
+        self.log_view.clear()
+        self._append_log("开始预览视场映射。")
+        self._append_log(f"待分析镜头: {zmx}")
+        self._append_log(f"分析模式: {'普通标准模板' if mode == 'standard' else '高级 Excel 配置'}")
+        if mode == "excel":
+            self._append_log(f"配置 Excel: {self.ed_config.text().strip()}")
+        # run_params 仅含标量（数字/字符串），dict() 浅拷贝即可安全跨线程传递。
+        self._field_preview_args = (zmx, dict(cfg.run_params), connect)
+        self._active_task = "field_preview"
+        self._start_field_preview_worker(None)
+
     def _on_export_standard_config(self):
         if self.cb_analysis_mode.currentData() != "standard":
             self._warn("请先将分析模式切换为“普通标准模板”。")
@@ -700,7 +911,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._warn("标准模板模式下，保存数量不能大于 MC 次数。")
             return
         if not outdir:
-            outdir = os.path.join(_HERE, "output")
+            outdir = os.path.join(_app_dir(), "output")
             self.ed_outdir.setText(outdir)
         os.makedirs(outdir, exist_ok=True)
         args = self._standard_args_from_ui()
@@ -744,7 +955,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._warn("Excel 配置不存在：\n" + config)
             return
         if not outdir:
-            outdir = os.path.join(_HERE, "output")
+            outdir = os.path.join(_app_dir(), "output")
         os.makedirs(outdir, exist_ok=True)
         self.ed_outdir.setText(outdir)
         if (use_standard or use_current) and self.sp_save.value() > self.sp_runs.value():
@@ -753,7 +964,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._remember_form_paths()
 
         standard_args = self._standard_args_from_ui() if use_standard else None
-        current_args = self._standard_args_from_ui() if use_current else None
+        current_args = self._current_args_from_ui() if use_current else None
 
         self.log_view.clear()
         self._append_log(
@@ -862,6 +1073,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._worker.need_zos_dir.connect(self._on_need_zos_dir)
         self._thread.start()
 
+    def _start_field_preview_worker(self, zos_dir):
+        if not self._field_preview_args:
+            self._warn("尚未设置视场映射预览参数，请先点击「预览视场映射」。")
+            return
+        zmx, run_params, connect = self._field_preview_args
+        self._set_running(True)
+        self._num_runs = 0
+        self._num_to_save = 0
+        self._elapsed = 0
+        self.lbl_elapsed.setText("已用时间 00:00")
+        self.lbl_runinfo.setText("视场映射预览中")
+        self._timer.start()
+        self._thread = QtCore.QThread(self)
+        self._worker = _FieldPreviewWorker(zmx, run_params, connect, zos_dir=zos_dir)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.log.connect(self._append_log)
+        self._worker.finished.connect(self._on_field_preview_finished)
+        self._worker.need_zos_dir.connect(self._on_need_zos_dir)
+        self._thread.start()
+
     def _on_tick(self):
         self._elapsed += 1
         m, s = divmod(self._elapsed, 60)
@@ -889,6 +1121,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_view.clear()
         self.statusBar().showMessage("日志已清空", 2000)
 
+    def _set_last_result_dir(self, path: str) -> None:
+        if os.path.isfile(path):
+            path = os.path.dirname(path)
+        if os.path.isdir(path):
+            self._settings.setValue("last_result_dir", os.path.abspath(path))
+
+    def _on_open_result_dir(self):
+        path = self._setting("last_result_dir", "")
+        if not path or not os.path.isdir(path):
+            fallback = self.ed_outdir.text().strip()
+            if os.path.isdir(fallback):
+                path = fallback
+        if not path or not os.path.isdir(path):
+            self._warn("暂无可打开的结果目录。请先完成一次分析，或确认输出目录存在。")
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(os.path.abspath(path)))
+        self.statusBar().showMessage("已打开结果目录", 2000)
+
     @QtCore.Slot(bool, str)
     def _on_finished(self, ok: bool, info: str):
         self._timer.stop()
@@ -900,6 +1150,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_running(False)
         self._active_task = ""
         if ok:
+            self._set_last_result_dir(info)
             self._append_log("✅ 分析完成。")
             self.statusBar().showMessage("分析完成")
             if self._num_runs:
@@ -922,6 +1173,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_running(False)
         self._active_task = ""
         if ok:
+            self._set_last_result_dir(info)
             self._append_log("✅ ZTD 分析完成。")
             self.statusBar().showMessage("ZTD 分析完成")
             self.lbl_runinfo.setText("ZTD 分析完成")
@@ -930,6 +1182,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("ZTD 分析失败")
             self.lbl_runinfo.setText("ZTD 分析失败")
             self._warn("ZTD 分析失败：\n" + info)
+
+    @QtCore.Slot(bool, str)
+    def _on_field_preview_finished(self, ok: bool, info: str):
+        self._timer.stop()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(5000)
+            self._thread = None
+        self._worker = None
+        self._set_running(False)
+        self._active_task = ""
+        if ok:
+            self._append_log("✅ " + info)
+            self.statusBar().showMessage("视场映射预览完成")
+            self.lbl_runinfo.setText("视场映射预览完成")
+        else:
+            self._append_log("❌ 视场映射预览失败：" + info)
+            self.statusBar().showMessage("视场映射预览失败")
+            self.lbl_runinfo.setText("视场映射预览失败")
+            self._warn("视场映射预览失败：\n" + info)
 
     @QtCore.Slot(list)
     def _on_need_zos_dir(self, searched: list):
@@ -977,6 +1249,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._append_log(f"使用 Zemax 目录重新连接：{d}")
             if self._active_task == "ztd":
                 self._start_ztd_worker(d)
+            elif self._active_task == "field_preview":
+                self._start_field_preview_worker(d)
             else:
                 self._start_worker(d)
             return
@@ -987,8 +1261,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def _set_running(self, running: bool):
         self.btn_run.setEnabled(not running)
         self.btn_ztd.setEnabled(not running)
-        self.btn_export_std.setEnabled(not running and self.cb_analysis_mode.currentData() == "standard")
         self.btn_cancel.setEnabled(running and self._active_task == "tol")
+        # 运行态统一禁用这些按钮；非运行态的显隐与 enable 交给 _on_analysis_mode_changed 复原。
+        for btn in (self.btn_export_std, self.btn_check_config,
+                    self.btn_preview_fields, self.btn_open_result):
+            btn.setEnabled(not running)
         for w in (self.ed_zmx, self.ed_config, self.ed_outdir,
                   self.ed_ztd, self.cb_mode, self.cb_analysis_mode,
                   self.standard_panel):
@@ -996,7 +1273,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not running:
             self._on_analysis_mode_changed()
         if running:
-            msg = "ZTD 分析中…" if self._active_task == "ztd" else "公差分析运行中…"
+            if self._active_task == "ztd":
+                msg = "ZTD 分析中…"
+            elif self._active_task == "field_preview":
+                msg = "视场映射预览中…"
+            else:
+                msg = "公差分析运行中…"
         else:
             msg = "就绪"
         self.statusBar().showMessage(msg)
@@ -1013,6 +1295,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     "ZTD 分析正在运行中。\n\n"
                     "关闭窗口将中断已有 ZTD 的读取与统计导出，"
                     "当前统计 Excel 可能不会生成。\n\n确定要关闭吗？")
+            elif self._active_task == "field_preview":
+                text = (
+                    "视场映射预览正在运行中。\n\n"
+                    "关闭窗口将中断预览并关闭后台 Zemax 实例。\n\n确定要关闭吗？")
             else:
                 text = (
                     "公差分析正在运行中。\n\n"
