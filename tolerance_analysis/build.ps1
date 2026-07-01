@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     一键打包「Zemax 公差分析」GUI 为 onedir EXE（可复用）。
 
@@ -30,11 +30,17 @@ $ErrorActionPreference = "Stop"
 $ProjDir = $PSScriptRoot
 Set-Location $ProjDir
 
-# Python 解释器：优先用 -PythonPath 指定，否则用工作区共享 venv
+# Python 解释器：优先用 -PythonPath 指定；否则用工作区共享 venv；若 venv 不存在则回退到 PATH 中的 python
 if ($PythonPath) {
     $Python = $PythonPath
 } else {
     $Python = Join-Path $ProjDir "..\.venv\Scripts\python.exe"
+    if (-not (Test-Path $Python)) {
+        $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+        if ($pythonCmd) {
+            $Python = $pythonCmd.Source
+        }
+    }
 }
 $Spec     = Join-Path $ProjDir "gui.spec"
 $AppName  = "公差分析"
@@ -109,6 +115,13 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller 构建失败（退出码 $LASTEXIT
 Write-Step "校验产物"
 if (-not (Test-Path $ExePath)) {
     throw "构建结束但未找到 EXE：$ExePath"
+}
+foreach ($name in @("tol_config_模板.xlsx", "zemax_config.ini.example")) {
+    $src = Join-Path $ProjDir $name
+    $dst = Join-Path $DistDir $name
+    if ((Test-Path $src) -and -not (Test-Path $dst)) {
+        throw "构建结束但交付文件缺失：$dst"
+    }
 }
 Write-Host ""
 Write-Host "构建成功 ✔" -ForegroundColor Green
