@@ -112,41 +112,73 @@ def _fmt_num(value) -> str:
         return str(value)
 
 
-def _field_mapping_report_lines(result) -> list[str]:
+def _insert_strategy_label(value) -> str:
+    text = str(value or "").strip()
+    if _yes(text):
+        return "自动插入"
+    if not text:
+        return "禁用"
+    return text
+
+
+def field_mapping_report_lines(result) -> list[str]:
+    missing = [item for item in result.final_matches if item.need_insert]
+    inserted_targets = {item.target_normalized for item in result.inserted_fields}
+    matched_count = len(result.final_matches) - len(missing)
+    title = "视场映射预览" if getattr(result, "is_preview", False) else "视场映射报告"
+    if getattr(result, "is_preview", False) and result.inserted_fields:
+        title += "（已模拟补齐）"
+    if result.inserted_fields:
+        conclusion = f"已匹配 {matched_count}/{len(result.targets)}，本次模拟补齐 {len(result.inserted_fields)}"
+    else:
+        conclusion = f"已匹配 {matched_count}/{len(result.targets)}，需补齐 {len(missing)}"
+    field_by_no = {field.field_no: field for field in result.final_fields}
     lines = [
-        "视场映射报告",
-        f"目标视场数: {len(result.targets)}",
-        f"匹配阈值: {result.threshold:g}",
-        f"插入策略: {result.insert_strategy}",
+        title,
+        f"结论: {conclusion}",
+        f"阈值: {result.threshold:g}；插入策略: {_insert_strategy_label(result.insert_strategy)}",
         "",
-        "匹配结果:",
+        "目标      视场号        X        Y    归一化    偏差  来源/状态",
     ]
     for item in result.final_matches:
+        if item.need_insert:
+            status = "仍需补齐"
+        elif item.target_normalized in inserted_targets:
+            status = "已补齐"
+        else:
+            status = "已有"
+        field = field_by_no.get(item.field_no)
+        x = _fmt_num(field.x if field else None)
+        y = _fmt_num(field.y if field else None)
         lines.append(
-            f"{item.report_label:<7} -> 视场号 {item.field_no}，"
-            f"实际归一化 {_fmt_num(item.actual_normalized)}，偏差 {_fmt_num(item.delta)}")
-    lines.extend([
-        "",
-        f"已插入缺失视场: {len(result.inserted_fields)}",
-        f"已改写 MFE: {result.mfe_updates} 行",
-        f"已改写 REPORT: {result.report_updates} 项",
-    ])
-    if result.messages:
+            f"{item.report_label:<8} {str(item.field_no or '-'):>5}  "
+            f"{x:>7}  {y:>7}  {_fmt_num(item.actual_normalized):>7}  "
+            f"{_fmt_num(item.delta):>6}  {status}")
+    if not getattr(result, "is_preview", False):
+        lines.extend([
+            "",
+            f"已插入缺失视场: {len(result.inserted_fields)}",
+            f"已改写 MFE: {result.mfe_updates} 行",
+            f"已改写 REPORT: {result.report_updates} 项",
+        ])
+    if missing:
         lines.append("")
-        lines.append("过程提示:")
+        lines.append("需补齐目标: " + ", ".join(item.report_label for item in missing))
+    elif result.messages and not getattr(result, "is_preview", False):
+        lines.append("")
         lines.extend(str(msg) for msg in result.messages)
     return lines
 
 
 def _log_field_mapping(result, log) -> None:
-    for line in _field_mapping_report_lines(result):
+    for line in field_mapping_report_lines(result):
         if line:
             log(line)
 
 
 def _write_field_mapping_report(path: str, result) -> None:
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(_field_mapping_report_lines(result)) + "\n")
+        f.write("\n".join(field_mapping_report_lines(result)) + "\n")
 
 
 def _log_to_file(path: str, message: str) -> None:
@@ -240,12 +272,17 @@ def _validate_inputs(cfg, rp: dict) -> None:
         raise ValueError("运行前校验失败：\n" + "\n".join(f"- {e}" for e in errors))
 
 
+def validate_config_data(cfg):
+    """只校验已读取/生成的配置内容，不连接 Zemax。"""
+    _validate_inputs(cfg, cfg.run_params)
+    return cfg
+
+
 def validate_config(zmx: str, config: str):
     """只校验文件路径和 Excel 配置，不连接 Zemax。"""
     _validate_paths(zmx, config)
     cfg = excel_io.read_config(config)
-    _validate_inputs(cfg, cfg.run_params)
-    return cfg
+    return validate_config_data(cfg)
 
 
 def _fill_auto_standard_surfaces(zos_system, cfg, rp: dict, log=print) -> None:
@@ -349,7 +386,8 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
             num_runs=_as_int(current_args.get("num_runs"), 20),
             num_to_save=_as_int(current_args.get("num_to_save"), 0),
             comp_mode=str(current_args.get("comp_mode") or "无"),
-            save_worst_best=_yes(current_args.get("save_worst_best")))
+            save_worst_best=_yes(current_args.get("save_worst_best")),
+            report_filter=current_args.get("report_filter"))
         rp = cfg.run_params
         _validate_inputs(cfg, rp)
         standard_mode = False
