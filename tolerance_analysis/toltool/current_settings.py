@@ -19,6 +19,12 @@ from .field_mapping import build_field_items, report_label as _field_report_labe
 
 _FIELD_SMALL_OPS = {"RSCE", "RWCE", "GENC"}
 _FIELD_LARGE_OPS = {"GMTT", "GMTS", "GMTA", "MTFT", "MTFS", "MTFA"}
+_COMMON_REPORT_OPS = _FIELD_SMALL_OPS | _FIELD_LARGE_OPS
+_REPORT_FILTERS = {
+    "all": "全部有效行",
+    "mtf": "仅 MTF 类",
+    "common": "常用评价类",
+}
 _PARAM_COLS = [f"Param{i}" for i in range(1, 9)]
 _OP_RE = re.compile(r"[A-Z]{3,4}")
 
@@ -115,10 +121,31 @@ def _current_field_normalized_map(zos_system) -> dict[int, float]:
     return {item.field_no: item.normalized for item in items}
 
 
-def read_current_mfe(zos_system) -> tuple[list[dict], list[dict]]:
+def _normalize_report_filter(report_filter: str | None) -> str:
+    key = str(report_filter or "all").strip().lower()
+    if key in _REPORT_FILTERS:
+        return key
+    labels = {v: k for k, v in _REPORT_FILTERS.items()}
+    return labels.get(str(report_filter or "").strip(), "all")
+
+
+def _report_enabled(op: str, report_filter: str) -> bool:
+    if report_filter == "mtf":
+        return op in _FIELD_LARGE_OPS
+    if report_filter == "common":
+        return op in _COMMON_REPORT_OPS
+    return True
+
+
+def report_filter_label(report_filter: str | None) -> str:
+    return _REPORT_FILTERS[_normalize_report_filter(report_filter)]
+
+
+def read_current_mfe(zos_system, report_filter: str | None = "all") -> tuple[list[dict], list[dict]]:
     """读取当前 MFE 有效行，返回 (mfe_rows, report_rows)。"""
     import ZOSAPI
 
+    report_filter = _normalize_report_filter(report_filter)
     mfe = zos_system.MFE
     merit_column = ZOSAPI.Editors.MFE.MeritColumn
     fields_by_no = _current_field_normalized_map(zos_system)
@@ -157,16 +184,19 @@ def read_current_mfe(zos_system) -> tuple[list[dict], list[dict]]:
             item["归一化视场"] = target
             item["视场映射说明"] = "当前设置模式按视场号反推"
         rows.append(item)
-        report.append({
-            "启用": "Y",
-            "标签": _report_label(op, line_no, item, fields_by_no),
-            "MF行号": line_no,
-            "方向": _direction(op),
-            "单位": _unit(op),
-        })
+        if _report_enabled(op, report_filter):
+            report.append({
+                "启用": "Y",
+                "标签": _report_label(op, line_no, item, fields_by_no),
+                "MF行号": line_no,
+                "方向": _direction(op),
+                "单位": _unit(op),
+            })
 
     if not rows:
         raise ValueError("当前 MFE 中没有可用于 REPORT 的有效操作数。")
+    if not report:
+        raise ValueError(f"当前 MFE 中没有符合 REPORT 筛选『{report_filter_label(report_filter)}』的操作数。")
     return rows, report
 
 
@@ -203,27 +233,32 @@ def detect_comp_freq_from_mfe(cfg: excel_io.Config) -> float | None:
 
 def summarize_config(cfg: excel_io.Config, limit: int = 8) -> list[str]:
     lines = [
-        f"当前设置模式：MFE 有效行 {len(cfg.mfe)}，自动 REPORT {len(cfg.report)}。"
+        f"当前设置模式：MFE 有效行 {len(cfg.mfe)}，自动 REPORT {len(cfg.report)}。",
+        f"REPORT 筛选: {cfg.run_params.get('当前设置REPORT筛选', '全部有效行')}",
     ]
-    for row, rep in zip(cfg.mfe[:limit], cfg.report[:limit]):
-        line = row.get("行号")
+    mfe_by_line = {row.get("行号"): row for row in cfg.mfe}
+    for rep in cfg.report[:limit]:
+        line = rep.get("MF行号")
+        row = mfe_by_line.get(line, {})
         op = row.get("操作数")
         target = row.get("目标")
         weight = row.get("权重")
         label = rep.get("标签")
         lines.append(
             f"  MFE[{line}] {op} 目标={target} 权重={weight} → REPORT {label}")
-    remain = len(cfg.mfe) - limit
+    remain = len(cfg.report) - limit
     if remain > 0:
-        lines.append(f"  ... 其余 {remain} 行已写入 used_excel.xlsx")
+        lines.append(f"  ... 其余 {remain} 个 REPORT 已写入 used_excel.xlsx")
     return lines
 
 
 def build_config_from_current_mfe(zos_system, num_runs: int = 20,
                                   num_to_save: int = 0,
                                   comp_mode: str = "无",
-                                  save_worst_best: bool = False) -> excel_io.Config:
-    mfe, report = read_current_mfe(zos_system)
+                                  save_worst_best: bool = False,
+                                  report_filter: str | None = "all") -> excel_io.Config:
+    report_filter = _normalize_report_filter(report_filter)
+    mfe, report = read_current_mfe(zos_system, report_filter=report_filter)
     return excel_io.Config(
         tol_wizard=[],
         tol_detail=[],
@@ -231,6 +266,7 @@ def build_config_from_current_mfe(zos_system, num_runs: int = 20,
         report=report,
         run_params={
             "分析模式": "当前设置",
+            "当前设置REPORT筛选": report_filter_label(report_filter),
             "蒙特卡洛次数": int(num_runs),
             "保存数量": int(num_to_save),
             "统计分布": "正态",
