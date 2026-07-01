@@ -33,6 +33,9 @@ hiddenimports = [
     "toltool.tsc_builder",
     "toltool.tol_runner",
     "toltool.ztd_reader",
+    "toltool.standard_templates",
+    "toltool.field_mapping",
+    "toltool.current_settings",
 ]
 
 a = Analysis(
