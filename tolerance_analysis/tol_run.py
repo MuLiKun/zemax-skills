@@ -14,7 +14,7 @@ import argparse
 import os
 import sys
 
-from toltool import excel_io, standard_templates
+from toltool import current_settings, excel_io, standard_templates
 
 
 def _cmd_init_template(args) -> int:
@@ -80,6 +80,7 @@ def _cmd_validate_only(args) -> int:
             print(f"配置校验失败：运行前校验失败：\n- ZMX 文件不存在：{args.zmx}", file=sys.stderr)
             return 1
         print("当前设置模式 validate-only：已校验 zmx 路径；MFE/TDE 需连接 Zemax 后运行期读取。")
+        print(f"REPORT 筛选: {current_settings.report_filter_label(args.current_report_filter)}")
         return 0
     if not args.config and not args.standard:
         print("错误：--validate-only 需要 --config，或使用 --standard / --current-settings。", file=sys.stderr)
@@ -117,6 +118,7 @@ def _cmd_run(args) -> int:
         print(f"标准模板配置: {config}")
     if args.current_settings:
         print("当前设置模式：将复用工作副本中的现有 TDE/MFE。")
+        print(f"REPORT 筛选: {current_settings.report_filter_label(args.current_report_filter)}")
 
     prep = pipeline.prepare_session(
         args.zmx, config, outdir=args.outdir, connect=args.connect,
@@ -126,6 +128,7 @@ def _cmd_run(args) -> int:
             "num_to_save": args.num_to_save,
             "comp_mode": args.comp_mode,
             "save_worst_best": args.save_worst_best,
+            "report_filter": args.current_report_filter,
         })
 
     export_stats = (not args.no_read) and _yes(prep.rp.get("输出统计Excel", "N"))
@@ -217,6 +220,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="标准模板/当前设置模式的补偿器模式")
     p.add_argument("--save-worst-best", action="store_true",
                    help="标准模板/当前设置模式下保存 Zemax Worst/Best case")
+    p.add_argument("--current-report-filter", choices=["all", "mtf", "common"],
+                   default="all", help="当前设置模式 REPORT 筛选：all=全部有效行，mtf=仅 MTF 类，common=常用评价类")
     return p
 
 
