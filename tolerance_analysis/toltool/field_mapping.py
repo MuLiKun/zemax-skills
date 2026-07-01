@@ -20,6 +20,7 @@ _FIELD_OPS = {"GENC", "GMTT", "GMTS", "GMTA"}
 
 # 目标视场来源策略：仅“显式”时跳过自动反推；其余值（含默认“自动推断”）走自动推断。
 _SOURCE_EXPLICIT_ONLY = {"仅目标列", "仅显式", "explicit", "explicit_only", "manual"}
+_EPS = 1e-9
 
 
 @dataclass
@@ -56,6 +57,7 @@ class FieldMappingResult:
     messages: list[str]
     mfe_updates: int = 0
     report_updates: int = 0
+    is_preview: bool = False
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -157,7 +159,7 @@ def build_matches(rows: list[FieldItem], targets: list[float], threshold: float)
                                       report_label(target)))
             continue
         delta = abs(hit.normalized - target)
-        need_insert = delta > threshold
+        need_insert = delta > threshold + _EPS
         matches.append(FieldMatch(
             target_normalized=target,
             field_no=hit.field_no,
@@ -318,6 +320,39 @@ def _apply_to_report_rows(report_rows: list[dict], mfe_rows: list[dict],
             updates += 1
         row["标签"] = new_label
     return new_rows, updates
+
+
+def preview(zos_system, run_params: dict, simulate_insert: bool = False) -> FieldMappingResult:
+    enabled = yes(run_params.get("启用视场映射", "N"))
+    strategy = str(run_params.get("视场插入策略") or "禁用").strip()
+    messages: list[str] = []
+    if not enabled:
+        return FieldMappingResult(False, strategy, _DEFAULT_THRESHOLD, [], [], [], [], [], messages, is_preview=True)
+    threshold = float(run_params.get("视场匹配阈值") or _DEFAULT_THRESHOLD)
+    targets = parse_targets(run_params.get("目标归一化视场") or DEFAULT_TARGETS)
+    original = build_field_items(_read_fields(zos_system))
+    initial_matches = build_matches(original, targets, threshold)
+    missing = [m for m in initial_matches if m.need_insert]
+    inserted: list[FieldMatch] = []
+    auto_insert = strategy.replace(" ", "").lower() in ("自动插入", "auto", "insert", "y", "yes")
+    if simulate_insert and auto_insert:
+        for item in missing:
+            if item.suggested_x is None or item.suggested_y is None:
+                raise RuntimeError(f"目标归一化视场 {item.target_normalized:g} 无法计算插入视场")
+            _add_field(zos_system, item.suggested_x, item.suggested_y)
+            inserted.append(item)
+        if inserted:
+            zos_system.Save()
+            messages.append(f"预览已在临时工作副本模拟插入 {len(inserted)} 个视场")
+    elif missing:
+        labels = ", ".join(m.report_label for m in missing)
+        messages.append(f"预览：以下目标视场超过阈值，正式运行时需自动插入或手动补齐：{labels}")
+    else:
+        messages.append("预览：所有目标视场均已在阈值内匹配。")
+    final_fields = build_field_items(_read_fields(zos_system))
+    final_matches = build_matches(final_fields, targets, threshold)
+    return FieldMappingResult(True, strategy, threshold, targets, original, inserted,
+                              final_fields, final_matches, messages, is_preview=True)
 
 
 def process(zos_system, cfg, run_params: dict, log=print) -> tuple[object, FieldMappingResult]:
