@@ -26,7 +26,7 @@ agentstudy/
 - 按 Excel 配置自动写公差表（TDE）、评价函数（MFE）、生成 TSC 脚本
 - 支持运行前配置校验，不连接 Zemax 即可检查路径、Excel 与 MFE/REPORT 映射
 - 支持高级 Excel 视场映射：按目标归一化视场匹配/插入 tol 工作副本视场，自动改写 RSCE、GENC/GMTT/GMTS/GMTA 和 REPORT 标签，并输出 `field_mapping.txt` 轻量复核报告；当前视场归一化按 X/Y 主轴处理，不再支持斜向二维视场投影
-- 支持普通标准模板模式：GUI/CLI 可直接选择模板、公差等级、MC 次数、保存数量、补偿方式与是否保存 WC/BC；默认自动使用主波长、自动识别公差结束面，并启用标准模板视场映射（目标 `0,0.5,0.9`）；运行期临时标准配置使用唯一文件名，避免覆盖用户导出的同名配置
+- 支持普通标准模板模式：GUI/CLI 可直接选择产品类型（RX/TX）、模板、公差等级、MC 次数、保存数量、补偿方式与是否保存 WC/BC；当前 TX 暂复用 RX 模板；默认自动使用主波长、自动识别公差结束面，并启用模板级视场映射（`标准分析` 目标 `0,0.5,0.9,-0.9`，`完整视场分析` 目标 `0,-0.25,0.25,-0.5,0.5,-0.7,0.7,-0.9,0.9,-1,1`）；运行期临时标准配置使用唯一文件名，避免覆盖用户导出的同名配置
 - 支持使用 Zemax 当前设置模式：复用 zmx 中已有 TDE/MFE，自动从当前 MFE 生成 REPORT/TSC；补偿器判断以 TDE 中的 `COMP` 操作数为准
 - 跑脚本式蒙特卡洛公差分析，在每次运行的时间戳结果目录内保存工作副本、ZTD、日志与配置快照
 - 读取 ZTD，把自定义脚本总值、REPORT 分项和 TDE 中的 `COMP` 补偿器项独立成列做统计，并导出统计 Excel；Cpk1.33 上下限双边输出，按方向标黄用户关注侧
@@ -50,10 +50,10 @@ cd tolerance_analysis
 ..\.venv\Scripts\python.exe -u main.py
 ```
 
-普通标准模板模式（不需要手写 Excel，当前为后台/CLI/GUI 最小可用版；模板内容集中在 `tolerance_analysis/toltool/standard_templates.py`，可后续替换为正式标准）。当前行为：主波长自动识别、结束面自动取像面前一面、优化补偿未填后焦补偿面时自动取像面前一面、标准模板视场映射默认开启并使用 `0,0.5,0.9`，运行期临时配置生成 `<镜头名>_标准模板配置_<8位uuid>.xlsx`，GUI 可勾选保存 WC/BC：
+普通标准模板模式（不需要手写 Excel，当前为后台/CLI/GUI 最小可用版；模板内容集中在 `tolerance_analysis/toltool/standard_templates.py`，可后续替换为正式标准）。当前行为：支持 RX/TX 产品类型（TX 暂复用 RX），模板为 `标准分析` / `完整视场分析`；主波长自动识别、结束面自动取像面前一面、优化补偿未填后焦补偿面时自动取像面前一面、标准模板视场映射默认开启并使用模板级目标视场，运行期临时配置生成 `<镜头名>_标准模板配置_<8位uuid>.xlsx`，GUI 可勾选保存 WC/BC：
 
 ```powershell
-.\.venv\Scripts\python.exe -u tolerance_analysis\tol_run.py --standard --zmx "镜头.zmx" --outdir "输出目录" --connect standalone --standard-template 快速摸底 --tolerance-level 标准 --num-runs 20
+.\.venv\Scripts\python.exe -u tolerance_analysis\tol_run.py --standard --zmx "镜头.zmx" --outdir "输出目录" --connect standalone --product-type RX --standard-template 标准分析 --tolerance-level 标准 --num-runs 20
 ```
 
 使用 Zemax 当前设置模式（不需要 Excel 配置，保留当前 TDE/MFE；如需补偿器优化，必须由当前 TDE 中的 `COMP` 操作数触发）：
@@ -85,6 +85,7 @@ cd tolerance_analysis
 
 > 仅记录功能层面的主要变更，便于追溯。日期格式 YYYY-MM-DD。
 
+- **2026-07-01** 标准模板体系优化：普通标准模板模式新增 RX/TX 产品类型（TX 暂复用 RX），模板收敛为 `标准分析` / `完整视场分析`，目标视场改为模板级配置；GUI 模板下拉增加鼠标悬停备注，CLI 新增 `--product-type`。
 - **2026-07-01** GUI 易用性增强与代码审查修正：GUI 按分析模式收敛控件（高级 Excel 才显示 Excel 配置行与「检查配置」，当前设置模式隐藏「预览视场映射」）；「预览视场映射」支持在 Standalone 临时工作副本模拟补齐缺失视场，用同一张表展示最终视场号、X/Y、归一化值与来源状态；新增「打开结果目录」按钮；REPORT 筛选 GUI 入口暂时下线（后端保留）；修复运行态/模式切换按钮状态一致性、输出目录兜底路径与标准模板校验口径。
 - **2026-06-29** 视场映射与标准模板临时配置修正：视场归一化改为 X/Y 主轴规则，修复纯 X 方向正负归一化不稳定问题，并移除斜向二维视场投影逻辑；普通标准模板运行期临时配置改为 UUID 唯一文件名，避免覆盖用户导出的同名标准配置。
 - **2026-06-27** 当前设置与 COMP 统计增强：新增使用 Zemax 当前 TDE/MFE 模式；补偿器判断改为扫描 TDE 中的 `COMP`；ZTD 统计纳入 COMP 补偿器项并按 TDE 顺序定位；独立分析已有 ZTD 可结合 `run_config.json` 复现 COMP 列；视场映射复核输出由 `mapped_excel.xlsx` 简化为 `field_mapping.txt`。
