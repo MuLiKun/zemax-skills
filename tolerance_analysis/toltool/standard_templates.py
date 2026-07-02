@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from dataclasses import dataclass
 
 from openpyxl import load_workbook
@@ -29,42 +30,44 @@ class OperandSpec:
 @dataclass(frozen=True)
 class TemplateSpec:
     name: str
+    description: str
+    target_fields: tuple[float, ...]
     operands: tuple[OperandSpec, ...]
 
 
 _LEVEL_VALUES = {
     "宽松": {
-        "半径": 5,
+        "半径": 3,
         "厚度": 0.05,
         "面偏心": 0.03,
-        "面倾斜": 0.3,
-        "元件偏心": 0.03,
-        "元件倾斜": 0.3,
-        "面不规则": 1.5,
-        "折射率": 0.001,
-        "阿贝%": 2,
+        "面倾斜": 0.05,
+        "元件偏心": 0.05,
+        "元件倾斜": 0.02,
+        "面不规则": 1,
+        "折射率": 0.0005,
+        "阿贝%": 1,
     },
     "标准": {
         "半径": 3,
         "厚度": 0.03,
         "面偏心": 0.02,
-        "面倾斜": 0.2,
-        "元件偏心": 0.02,
-        "元件倾斜": 0.2,
+        "面倾斜": 0.025,
+        "元件偏心": 0.03,
+        "元件倾斜": 0.15,
         "面不规则": 1,
         "折射率": 0.0005,
         "阿贝%": 1,
     },
     "严格": {
-        "半径": 1.5,
-        "厚度": 0.015,
+        "半径": 3,
+        "厚度": 0.02,
         "面偏心": 0.01,
-        "面倾斜": 0.1,
-        "元件偏心": 0.01,
+        "面倾斜": 0.02,
+        "元件偏心": 0.02,
         "元件倾斜": 0.1,
-        "面不规则": 0.5,
-        "折射率": 0.0002,
-        "阿贝%": 0.5,
+        "面不规则": 1,
+        "折射率": 0.0005,
+        "阿贝%": 1,
     },
 }
 
@@ -123,52 +126,100 @@ def _mtf(label: str, op: str, field_no: int, freq: float,
     )
 
 
-_TEMPLATES = {
-    "快速摸底": TemplateSpec(
-        name="快速摸底",
+STANDARD_TARGET_FIELDS = (0, 0.5, 0.9, -0.9)
+FULL_TARGET_FIELDS = (0, -0.25, 0.25, -0.5, 0.5, -0.7, 0.7, -0.9, 0.9, -1, 1)
+PRODUCT_TYPES = ("RX", "TX")
+DEFAULT_PRODUCT_TYPE = "RX"
+DEFAULT_TEMPLATE_NAME = "标准分析"
+
+
+def _field_label(value: float) -> str:
+    if abs(float(value)) < 1e-12:
+        return "F0"
+    return f"F{float(value):g}"
+
+
+def _spot_operands(fields: tuple[float, ...]) -> tuple[OperandSpec, ...]:
+    return tuple(_spot(f"SPOT_{_field_label(field)}", field) for field in fields)
+
+
+def _genc_operands(fields: tuple[float, ...]) -> tuple[OperandSpec, ...]:
+    return tuple(
+        _genc(f"GENC95_{_field_label(field)}", 1, field)
+        for field in fields
+    )
+
+
+def _mtf_operands(fields: tuple[float, ...]) -> tuple[OperandSpec, ...]:
+    rows: list[OperandSpec] = []
+    for field in fields:
+        label = _field_label(field)
+        rows.append(_mtf(f"GMTFT_{label}", "GMTT", 1, 34, field))
+        rows.append(_mtf(f"GMTFS_{label}", "GMTS", 1, 34, field))
+    return tuple(rows)
+
+
+_RX_TEMPLATES = {
+    "标准分析": TemplateSpec(
+        name="标准分析",
+        description="标准分析：使用 0、0.5、0.9、-0.9 目标视场；包含点列评价，并对 ±0.9 边缘视场增加 GENC/MTF 评价。",
+        target_fields=STANDARD_TARGET_FIELDS,
         operands=(
-            _spot("SPOT_F0", 0),
-            _spot("SPOT_F0.5", 0.5),
-            _spot("SPOT_F0.9", 0.9),
+            *_spot_operands(STANDARD_TARGET_FIELDS),
+            *_genc_operands((0.9, -0.9)),
+            *_mtf_operands((0.9, -0.9)),
         ),
     ),
-    "RX标准分析": TemplateSpec(
-        name="RX标准分析",
+    "完整视场分析": TemplateSpec(
+        name="完整视场分析",
+        description="完整视场分析：使用 0、±0.25、±0.5、±0.7、±0.9、±1 全视场序列；包含全视场 SPOT、GENC、GMTT、GMTS 评价。",
+        target_fields=FULL_TARGET_FIELDS,
         operands=(
-            _spot("SPOT_F0", 0),
-            _spot("SPOT_F0.5", 0.5),
-            _spot("SPOT_F0.9", 0.9),
-            _genc("GENC95_F0.9", 1, 0.9),
-            _mtf("GMTFT_F0.9", "GMTT", 1, 34, 0.9),
-            _mtf("GMTFS_F0.9", "GMTS", 1, 34, 0.9),
-        ),
-    ),
-    "点列优先": TemplateSpec(
-        name="点列优先",
-        operands=(
-            _spot("SPOT_F0", 0),
-            _spot("SPOT_F0.5", 0.5),
-            _spot("SPOT_F0.9", 0.9),
-        ),
-    ),
-    "MTF优先": TemplateSpec(
-        name="MTF优先",
-        operands=(
-            _mtf("GMTFT_F0.9", "GMTT", 1, 34, 0.9),
-            _mtf("GMTFS_F0.9", "GMTS", 1, 34, 0.9),
-        ),
-    ),
-    "能量集中度": TemplateSpec(
-        name="能量集中度",
-        operands=(
-            _genc("GENC95_F0.9", 1, 0.9),
+            *_spot_operands(FULL_TARGET_FIELDS),
+            *_genc_operands(FULL_TARGET_FIELDS),
+            *_mtf_operands(FULL_TARGET_FIELDS),
         ),
     ),
 }
+_PRODUCT_TEMPLATES = {
+    "RX": _RX_TEMPLATES,
+    "TX": _RX_TEMPLATES,
+}
 
 
-TEMPLATE_NAMES = tuple(_TEMPLATES.keys())
+TEMPLATE_NAMES = tuple(_RX_TEMPLATES.keys())
 LEVEL_NAMES = tuple(_LEVEL_VALUES.keys())
+
+
+def product_types() -> tuple[str, ...]:
+    return PRODUCT_TYPES
+
+
+def template_names(product_type: str = DEFAULT_PRODUCT_TYPE) -> tuple[str, ...]:
+    return tuple(_templates_for_product(product_type).keys())
+
+
+def template_description(template: str, product_type: str = DEFAULT_PRODUCT_TYPE) -> str:
+    return _template_spec(template, product_type).description
+
+
+def _normalize_product_type(product_type: str | None) -> str:
+    text = str(product_type or DEFAULT_PRODUCT_TYPE).strip().upper()
+    if text not in PRODUCT_TYPES:
+        raise ValueError(f"产品类型仅支持：{', '.join(PRODUCT_TYPES)}")
+    return text
+
+
+def _templates_for_product(product_type: str | None) -> dict[str, TemplateSpec]:
+    return _PRODUCT_TEMPLATES[_normalize_product_type(product_type)]
+
+
+def _template_spec(template: str, product_type: str | None = DEFAULT_PRODUCT_TYPE) -> TemplateSpec:
+    templates = _templates_for_product(product_type)
+    spec = templates.get(template)
+    if spec is None:
+        raise ValueError(f"标准模板仅支持：{', '.join(templates.keys())}")
+    return spec
 
 
 def _tol_wizard_rows(level: str, start_surface: int, end_surface: int) -> list[dict]:
@@ -227,10 +278,13 @@ def _add_mfe(rows: list[dict], line_no: int, spec: OperandSpec,
     rows.append(row)
 
 
-def _mfe_and_report(template: str, center_wave: int) -> tuple[list[dict], list[dict]]:
-    spec = _TEMPLATES.get(template)
-    if spec is None:
-        raise ValueError(f"未知标准模板：{template}")
+def _format_target_fields(fields: tuple[float, ...]) -> str:
+    return ",".join(f"{float(field):g}" for field in fields)
+
+
+def _mfe_and_report(template: str, center_wave: int,
+                    product_type: str = DEFAULT_PRODUCT_TYPE) -> tuple[list[dict], list[dict]]:
+    spec = _template_spec(template, product_type)
 
     mfe: list[dict] = []
     report: list[dict] = []
@@ -248,20 +302,21 @@ def _mfe_and_report(template: str, center_wave: int) -> tuple[list[dict], list[d
     return mfe, report
 
 
-def build_config(zmx_path: str, template: str = "快速摸底", level: str = "标准",
+def build_config(zmx_path: str, template: str = DEFAULT_TEMPLATE_NAME, level: str = "标准",
                  num_runs: int = 20, num_to_save: int = 0,
                  center_wave: int = 0, comp_mode: str = "无",
-                 save_worst_best: bool = False) -> excel_io.Config:
-    template = template.strip() or "快速摸底"
+                 save_worst_best: bool = False,
+                 product_type: str = DEFAULT_PRODUCT_TYPE) -> excel_io.Config:
+    product_type = _normalize_product_type(product_type)
+    template = template.strip() or DEFAULT_TEMPLATE_NAME
     level = level.strip() or "标准"
-    if template not in TEMPLATE_NAMES:
-        raise ValueError(f"标准模板仅支持：{', '.join(TEMPLATE_NAMES)}")
+    spec = _template_spec(template, product_type)
     if level not in LEVEL_NAMES:
         raise ValueError(f"公差等级仅支持：{', '.join(LEVEL_NAMES)}")
 
     start_surface = 1
     end_surface = 0
-    mfe, report = _mfe_and_report(template, center_wave)
+    mfe, report = _mfe_and_report(template, center_wave, product_type)
     return excel_io.Config(
         tol_wizard=_tol_wizard_rows(level, start_surface, end_surface),
         tol_detail=[],
@@ -269,6 +324,7 @@ def build_config(zmx_path: str, template: str = "快速摸底", level: str = "�
         report=report,
         run_params={
             "分析模式": "标准模板",
+            "产品类型": product_type,
             "标准模板": template,
             "公差等级": level,
             "蒙特卡洛次数": int(num_runs),
@@ -280,7 +336,7 @@ def build_config(zmx_path: str, template: str = "快速摸底", level: str = "�
             "后焦补偿面": "",
             "补偿Min": "",
             "补偿Max": "",
-            "补偿线对": 34,
+            "补偿线对": 17,
             "保存TSC": "Y",
             "保存WorstCase": "Y" if save_worst_best else "N",
             "保存BestCase": "Y" if save_worst_best else "N",
@@ -288,8 +344,8 @@ def build_config(zmx_path: str, template: str = "快速摸底", level: str = "�
             "输出直方图": "N",
             "启用视场映射": "Y",
             "视场插入策略": "自动插入",
-            "视场匹配阈值": 0.05,
-            "目标归一化视场": "0,0.5,0.9",
+            "视场匹配阈值": 0.001,
+            "目标归一化视场": _format_target_fields(spec.target_fields),
             "目标视场来源策略": "自动推断",
         },
     )
@@ -326,12 +382,16 @@ def default_config_path(zmx_path: str, outdir: str | None = None) -> str:
 
 def make_temp_config(zmx_path: str, outdir: str | None, template: str, level: str,
                      num_runs: int, num_to_save: int, center_wave: int,
-                     comp_mode: str, save_worst_best: bool = False) -> str:
+                     comp_mode: str, save_worst_best: bool = False,
+                     product_type: str = DEFAULT_PRODUCT_TYPE) -> str:
     parent = os.path.abspath(outdir) if outdir else os.path.dirname(os.path.abspath(zmx_path))
     os.makedirs(parent, exist_ok=True)
-    path = default_config_path(zmx_path, parent)
+    base = os.path.splitext(os.path.basename(zmx_path))[0]
+    safe = re.sub(r'[^0-9A-Za-z_\-\u4e00-\u9fff]+', "_", base).strip("._") or "lens"
+    path = os.path.join(parent, f"{safe}_标准模板配置_{uuid.uuid4().hex[:8]}.xlsx")
     cfg = build_config(zmx_path, template=template, level=level,
                        num_runs=num_runs, num_to_save=num_to_save,
                        center_wave=center_wave, comp_mode=comp_mode,
-                       save_worst_best=save_worst_best)
-    return write_config_excel(path, cfg, overwrite=True)
+                       save_worst_best=save_worst_best,
+                       product_type=product_type)
+    return write_config_excel(path, cfg, overwrite=False)
