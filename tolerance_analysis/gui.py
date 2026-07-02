@@ -88,6 +88,12 @@ def _apply_dark_titlebar(widget: QtWidgets.QWidget) -> None:
             if dwm.DwmSetWindowAttribute(
                 hwnd, attr, ctypes.byref(value), ctypes.sizeof(value)) == 0:
                 break
+        caption = ctypes.c_int(0x001f1e1e)
+        text = ctypes.c_int(0x00dedddc)
+        border = ctypes.c_int(0x00363230)
+        dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption))
+        dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(text), ctypes.sizeof(text))
+        dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(border), ctypes.sizeof(border))
     except Exception:
         pass
 
@@ -135,7 +141,20 @@ def _apply_dark_palette(app: QtWidgets.QApplication) -> None:
 
     app.setStyleSheet(
         """
-        QWidget { font-size: 13px; }
+        QWidget { font-size: 13px; background-color: #1e1f22; color: #dcddde; }
+        QMainWindow, QDialog, QMessageBox { background-color: #1e1f22; }
+        QStatusBar { background-color: #17181a; color: #cfd0d1; border-top: 1px solid #303236; }
+        QTabWidget::pane {
+            border: 1px solid #3a3d41; border-radius: 6px;
+            background-color: #252629; top: -1px;
+        }
+        QTabBar::tab {
+            background-color: #2b2d30; border: 1px solid #3a3d41;
+            padding: 7px 14px; margin-right: 2px;
+            border-top-left-radius: 5px; border-top-right-radius: 5px;
+        }
+        QTabBar::tab:selected { background-color: #35373b; border-bottom-color: #35373b; }
+        QTabBar::tab:hover { background-color: #3a3d41; }
         QPushButton {
             background-color: #3a3d41; border: 1px solid #4a4d51;
             border-radius: 4px; padding: 6px 14px;
@@ -147,10 +166,15 @@ def _apply_dark_palette(app: QtWidgets.QApplication) -> None:
                           color: white; font-weight: bold; }
         QPushButton#run:hover { background-color: #3a7be0; }
         QPushButton#run:disabled { background-color: #3a3d41; color: #787878; }
-        QLineEdit, QComboBox {
+        QLineEdit, QComboBox, QSpinBox {
             background-color: #2b2d30; border: 1px solid #4a4d51;
             border-radius: 4px; padding: 5px 8px;
+            selection-background-color: #2f6fd0;
         }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+            border-color: #4f8fe8;
+        }
+        QCheckBox { spacing: 6px; }
         QComboBox QAbstractItemView {
             background-color: #2b2d30; selection-background-color: #2f6fd0;
         }
@@ -159,6 +183,14 @@ def _apply_dark_palette(app: QtWidgets.QApplication) -> None:
             border-radius: 4px; font-family: Consolas, "Courier New", monospace;
         }
         QLabel#hint { color: #9a9b9c; }
+        QGroupBox {
+            border: 1px solid #3a3d41; border-radius: 6px;
+            margin-top: 10px; padding: 10px 8px 8px 8px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin; left: 10px; padding: 0 4px;
+            font-weight: bold;
+        }
         """
     )
 
@@ -485,7 +517,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Zemax 公差分析")
-        self.resize(720, 560)
+        self.resize(920, 720)
+        self.setMinimumSize(860, 640)
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self._thread = None
         self._worker = None
         self._run_args = None
@@ -500,10 +534,26 @@ class MainWindow(QtWidgets.QMainWindow):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(10)
 
-        form = QtWidgets.QGridLayout()
-        form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(8)
-        root.addLayout(form)
+        self.tabs = QtWidgets.QTabWidget()
+        root.addWidget(self.tabs)
+
+        main_page = QtWidgets.QWidget()
+        main_layout = QtWidgets.QVBoxLayout(main_page)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(10)
+        self.tabs.addTab(main_page, "公差分析")
+
+        ztd_page = QtWidgets.QWidget()
+        ztd_layout = QtWidgets.QVBoxLayout(ztd_page)
+        ztd_layout.setContentsMargins(8, 8, 8, 8)
+        ztd_layout.setSpacing(10)
+        self.tabs.addTab(ztd_page, "已有 ZTD")
+
+        paths_group = QtWidgets.QGroupBox("输入与输出")
+        paths_form = QtWidgets.QGridLayout(paths_group)
+        paths_form.setHorizontalSpacing(8)
+        paths_form.setVerticalSpacing(8)
+        main_layout.addWidget(paths_group)
 
         self.ed_zmx = QtWidgets.QLineEdit(
             self._setting("zmx", DEFAULT_ZMX))
@@ -511,14 +561,48 @@ class MainWindow(QtWidgets.QMainWindow):
             self._setting("config", DEFAULT_CONFIG))
         self.ed_outdir = QtWidgets.QLineEdit(
             self._setting("outdir", DEFAULT_OUTDIR))
-        self._add_file_row(form, 0, "待分析 zmx：", self.ed_zmx,
+        self.ed_ztd = QtWidgets.QLineEdit(self._setting("ztd", ""))
+        self._add_file_row(paths_form, 0, "待分析 zmx：", self.ed_zmx,
                            self._pick_zmx)
-        self.btn_pick_config = self._add_file_row(form, 1, "Excel 配置：", self.ed_config,
+        self.btn_pick_config = self._add_file_row(paths_form, 1, "Excel 配置：", self.ed_config,
                                                   self._pick_config)
-        self._add_file_row(form, 2, "输出目录：", self.ed_outdir,
+        self._add_file_row(paths_form, 2, "输出目录：", self.ed_outdir,
                            self._pick_outdir)
 
-        form.addWidget(QtWidgets.QLabel("分析模式："), 3, 0)
+        ztd_group = QtWidgets.QGroupBox("已有 ZTD 分析")
+        ztd_form = QtWidgets.QGridLayout(ztd_group)
+        ztd_form.setHorizontalSpacing(8)
+        ztd_form.setVerticalSpacing(10)
+        ztd_form.setColumnStretch(1, 1)
+        self.btn_pick_ztd = self._add_file_row(ztd_form, 0, "ZTD 文件：", self.ed_ztd,
+                                               self._pick_ztd)
+        ztd_hint = QtWidgets.QLabel(
+            "用于重新读取已有 .ZTD 并导出统计结果。优先使用 ZTD 同目录的 used_excel.xlsx，"
+            "不存在时使用主分析页选择的 Excel 配置。")
+        ztd_hint.setObjectName("hint")
+        ztd_hint.setWordWrap(True)
+        ztd_form.addWidget(ztd_hint, 1, 1, 1, 3)
+        ztd_form.addWidget(QtWidgets.QLabel("连接模式："), 2, 0)
+        self.lb_ztd_connect = QtWidgets.QLabel("跟随主分析页连接模式")
+        self.lb_ztd_connect.setObjectName("hint")
+        ztd_form.addWidget(self.lb_ztd_connect, 2, 1, 1, 3)
+        ztd_actions = QtWidgets.QHBoxLayout()
+        ztd_actions.addStretch(1)
+        self.btn_ztd = QtWidgets.QPushButton("分析已有 ZTD")
+        self.btn_ztd.setObjectName("run")
+        self.btn_ztd.clicked.connect(self._on_analyze_ztd)
+        ztd_actions.addWidget(self.btn_ztd)
+        ztd_form.addLayout(ztd_actions, 3, 0, 1, 4)
+        ztd_layout.addWidget(ztd_group)
+        ztd_layout.addStretch(1)
+
+        params_group = QtWidgets.QGroupBox("分析设置")
+        params_form = QtWidgets.QGridLayout(params_group)
+        params_form.setHorizontalSpacing(8)
+        params_form.setVerticalSpacing(8)
+        main_layout.addWidget(params_group)
+
+        params_form.addWidget(QtWidgets.QLabel("分析模式："), 0, 0)
         self.cb_analysis_mode = QtWidgets.QComboBox()
         self.cb_analysis_mode.addItem("高级 Excel 配置", "excel")
         self.cb_analysis_mode.addItem("普通标准模板", "standard")
@@ -527,17 +611,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if mode >= 0:
             self.cb_analysis_mode.setCurrentIndex(mode)
         self.cb_analysis_mode.currentIndexChanged.connect(self._on_analysis_mode_changed)
-        form.addWidget(self.cb_analysis_mode, 3, 1, 1, 2)
+        params_form.addWidget(self.cb_analysis_mode, 0, 1, 1, 2)
 
         self.standard_panel = QtWidgets.QWidget()
-        std = QtWidgets.QHBoxLayout(self.standard_panel)
+        std = QtWidgets.QGridLayout(self.standard_panel)
         std.setContentsMargins(0, 0, 0, 0)
-        std.setSpacing(6)
+        std.setHorizontalSpacing(6)
+        std.setVerticalSpacing(6)
         self.cb_product_type = QtWidgets.QComboBox()
         self.cb_product_type.addItems(standard_templates.product_types())
         idx = self.cb_product_type.findText(self._setting("product_type", standard_templates.DEFAULT_PRODUCT_TYPE))
         if idx >= 0:
             self.cb_product_type.setCurrentIndex(idx)
+        self._update_product_tooltips()
         self.cb_std_template = QtWidgets.QComboBox()
         self._refresh_standard_templates(self._setting("standard_template", standard_templates.DEFAULT_TEMPLATE_NAME))
         self.cb_product_type.currentIndexChanged.connect(self._on_product_type_changed)
@@ -566,80 +652,98 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lb_runs = QtWidgets.QLabel("MC")
         self.lb_save = QtWidgets.QLabel("保存")
         self.lb_comp = QtWidgets.QLabel("补偿")
-        std.addWidget(self.lb_product_type)
-        std.addWidget(self.cb_product_type)
-        std.addWidget(self.lb_std_template)
-        std.addWidget(self.cb_std_template, 2)
-        std.addWidget(self.lb_tol_level)
-        std.addWidget(self.cb_tol_level)
-        std.addWidget(self.lb_runs)
-        std.addWidget(self.sp_runs)
-        std.addWidget(self.lb_save)
-        std.addWidget(self.sp_save)
-        std.addWidget(self.lb_comp)
-        std.addWidget(self.cb_comp)
-        std.addWidget(self.chk_save_worst_best)
+        std.addWidget(self.lb_product_type, 0, 0)
+        std.addWidget(self.cb_product_type, 0, 1)
+        std.addWidget(self.lb_std_template, 0, 2)
+        std.addWidget(self.cb_std_template, 0, 3)
+        std.addWidget(self.lb_tol_level, 0, 4)
+        std.addWidget(self.cb_tol_level, 0, 5)
+        std.addWidget(self.lb_runs, 1, 0)
+        std.addWidget(self.sp_runs, 1, 1)
+        std.addWidget(self.lb_save, 1, 2)
+        std.addWidget(self.sp_save, 1, 3)
+        std.addWidget(self.lb_comp, 1, 4)
+        std.addWidget(self.cb_comp, 1, 5)
+        std.addWidget(self.chk_save_worst_best, 1, 6)
+        std.setColumnStretch(3, 1)
         self.lb_standard_panel = QtWidgets.QLabel("标准模板：")
-        form.addWidget(self.lb_standard_panel, 4, 0)
-        form.addWidget(self.standard_panel, 4, 1, 1, 2)
+        params_form.addWidget(self.lb_standard_panel, 1, 0)
+        params_form.addWidget(self.standard_panel, 1, 1, 1, 2)
 
-        form.addWidget(QtWidgets.QLabel("连接模式："), 5, 0)
+        params_form.addWidget(QtWidgets.QLabel("连接模式："), 2, 0)
         self.cb_mode = QtWidgets.QComboBox()
         self.cb_mode.addItem("Standalone（程序后台挂起，推荐）", "standalone")
         self.cb_mode.addItem("GUI 模式（连入交互扩展窗口）", "extension")
         mode_index = self.cb_mode.findData(self._setting("connect", "standalone"))
         if mode_index >= 0:
             self.cb_mode.setCurrentIndex(mode_index)
-        self.cb_mode.currentIndexChanged.connect(
-            lambda: self._settings.setValue(
-                "connect", self.cb_mode.currentData()))
-        form.addWidget(self.cb_mode, 5, 1, 1, 2)
+        self.cb_mode.currentIndexChanged.connect(self._on_connect_mode_changed)
+        params_form.addWidget(self.cb_mode, 2, 1, 1, 2)
 
-        self.ed_ztd = QtWidgets.QLineEdit(self._setting("ztd", ""))
-        self.btn_pick_ztd = self._add_file_row(form, 6, "已有 ZTD：", self.ed_ztd,
-                                               self._pick_ztd)
+        hint = QtWidgets.QLabel(
+            "提示：GUI 模式需先在 OpticStudio 进入「编程 → 交互扩展」并等待。")
+        hint.setObjectName("hint")
+        params_form.addWidget(hint, 3, 1, 1, 2)
 
-        self.ztd_panel = QtWidgets.QWidget()
-        ztdbar = QtWidgets.QHBoxLayout(self.ztd_panel)
-        ztdbar.setContentsMargins(0, 0, 0, 0)
-        ztdbar.addStretch(1)
-        self.btn_ztd = QtWidgets.QPushButton("分析已有 ZTD")
-        self.btn_ztd.clicked.connect(self._on_analyze_ztd)
-        ztdbar.addWidget(self.btn_ztd)
-        root.addWidget(self.ztd_panel)
-
-        btns = QtWidgets.QHBoxLayout()
-        btns.addStretch(1)
+        actions_group = QtWidgets.QGroupBox("运行")
+        btns = QtWidgets.QHBoxLayout(actions_group)
+        btns.setSpacing(8)
         self.btn_export_std = QtWidgets.QPushButton("导出标准配置")
         self.btn_export_std.clicked.connect(self._on_export_standard_config)
         self.btn_check_config = QtWidgets.QPushButton("检查配置")
         self.btn_check_config.clicked.connect(self._on_check_config)
         self.btn_preview_fields = QtWidgets.QPushButton("预览视场映射")
         self.btn_preview_fields.clicked.connect(self._on_preview_field_mapping)
-        self.btn_open_result = QtWidgets.QPushButton("打开结果目录")
-        self.btn_open_result.clicked.connect(self._on_open_result_dir)
+
+        self.check_dialog = QtWidgets.QDialog(self)
+        self.check_dialog.setWindowTitle("配置与视场检查")
+        self.check_dialog.setModal(False)
+        self.check_dialog.resize(420, 170)
+        check_dialog_layout = QtWidgets.QVBoxLayout(self.check_dialog)
+        check_dialog_layout.setContentsMargins(14, 14, 14, 14)
+        check_dialog_layout.setSpacing(10)
+        check_hint = QtWidgets.QLabel(
+            "用于运行前校验 Excel/标准模板配置，或连接 Zemax 预览视场映射。"
+            "这些操作不会启动完整公差分析。")
+        check_hint.setObjectName("hint")
+        check_hint.setWordWrap(True)
+        check_dialog_layout.addWidget(check_hint)
+        check_mode_row = QtWidgets.QHBoxLayout()
+        check_mode_row.addWidget(QtWidgets.QLabel("当前模式："))
+        self.lb_check_mode = QtWidgets.QLabel("")
+        self.lb_check_mode.setObjectName("hint")
+        check_mode_row.addWidget(self.lb_check_mode)
+        check_mode_row.addStretch(1)
+        check_dialog_layout.addLayout(check_mode_row)
+        check_actions = QtWidgets.QHBoxLayout()
+        check_actions.addWidget(self.btn_export_std)
+        check_actions.addWidget(self.btn_check_config)
+        check_actions.addWidget(self.btn_preview_fields)
+        check_actions.addStretch(1)
+        check_dialog_layout.addLayout(check_actions)
+        self.btn_show_check = QtWidgets.QPushButton("配置检查…")
+        self.btn_show_check.clicked.connect(self._show_check_dialog)
+
         self.btn_run = QtWidgets.QPushButton("开始分析")
         self.btn_run.setObjectName("run")
         self.btn_run.clicked.connect(self._on_run)
         self.btn_cancel = QtWidgets.QPushButton("取消")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._on_cancel)
-        btns.addWidget(self.btn_export_std)
-        btns.addWidget(self.btn_check_config)
-        btns.addWidget(self.btn_preview_fields)
-        btns.addWidget(self.btn_open_result)
+        btns.addWidget(self.btn_show_check)
+        btns.addStretch(1)
         btns.addWidget(self.btn_cancel)
         btns.addWidget(self.btn_run)
-        root.addLayout(btns)
+        main_layout.addWidget(actions_group)
+        main_layout.addStretch(1)
         self._on_analysis_mode_changed()
 
-        hint = QtWidgets.QLabel(
-            "提示：GUI 模式需先在 OpticStudio 进入「编程 → 交互扩展」并等待。")
-        hint.setObjectName("hint")
-        root.addWidget(hint)
-
+        log_group = QtWidgets.QGroupBox("运行日志")
+        log_group_layout = QtWidgets.QVBoxLayout(log_group)
         logbar = QtWidgets.QHBoxLayout()
-        logbar.addWidget(QtWidgets.QLabel("日志："))
+        self.btn_open_result_log = QtWidgets.QPushButton("打开结果目录")
+        self.btn_open_result_log.clicked.connect(self._on_open_result_dir)
+        logbar.addWidget(self.btn_open_result_log)
         logbar.addStretch(1)
         self.btn_copy = QtWidgets.QPushButton("复制日志")
         self.btn_copy.clicked.connect(self._on_copy_log)
@@ -647,12 +751,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_clear.clicked.connect(self._on_clear_log)
         logbar.addWidget(self.btn_copy)
         logbar.addWidget(self.btn_clear)
-        root.addLayout(logbar)
+        log_group_layout.addLayout(logbar)
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
-        root.addWidget(self.log_view, 1)
+        log_group_layout.addWidget(self.log_view)
+        root.addWidget(log_group, 1)
 
         self.lbl_runinfo = QtWidgets.QLabel("")
         self.lbl_elapsed = QtWidgets.QLabel("")
@@ -666,6 +771,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._on_tick)
 
+        self._on_connect_mode_changed()
         self.statusBar().showMessage("就绪")
 
     def _add_file_row(self, grid, row, label, edit, slot):
@@ -684,12 +790,32 @@ class MainWindow(QtWidgets.QMainWindow):
         getattr(btn, "_row_label").setVisible(visible)
         getattr(btn, "_row_edit").setVisible(visible)
 
+    def _update_product_tooltips(self) -> None:
+        model = self.cb_product_type.model()
+        for row, product_type in enumerate(standard_templates.product_types()):
+            tip = standard_templates.product_description(product_type)
+            item = model.item(row)
+            if item is not None:
+                item.setToolTip(tip)
+        self._update_product_tooltip()
+
+    def _update_product_tooltip(self) -> None:
+        product_type = self.cb_product_type.currentText() or standard_templates.DEFAULT_PRODUCT_TYPE
+        tip = standard_templates.product_description(product_type)
+        self.cb_product_type.setToolTip(tip)
+        if hasattr(self, "lb_product_type"):
+            self.lb_product_type.setToolTip(tip)
+
     def _refresh_standard_templates(self, preferred: str = "") -> None:
         product_type = self.cb_product_type.currentText() or standard_templates.DEFAULT_PRODUCT_TYPE
         names = standard_templates.template_names(product_type)
         self.cb_std_template.blockSignals(True)
         self.cb_std_template.clear()
         self.cb_std_template.addItems(names)
+        for row, name in enumerate(names):
+            item = self.cb_std_template.model().item(row)
+            if item is not None:
+                item.setToolTip(standard_templates.template_description(name, product_type))
         idx = self.cb_std_template.findText(preferred or standard_templates.DEFAULT_TEMPLATE_NAME)
         if idx < 0:
             idx = 0
@@ -710,6 +836,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lb_std_template.setToolTip(tip)
 
     def _on_product_type_changed(self) -> None:
+        self._update_product_tooltip()
         self._refresh_standard_templates(self.cb_std_template.currentText())
 
     def _setting(self, key: str, default: str = "") -> str:
@@ -740,6 +867,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if last_dir and os.path.isdir(last_dir):
             return last_dir
         return _app_dir()
+
+    def _on_connect_mode_changed(self) -> None:
+        self._settings.setValue("connect", self.cb_mode.currentData())
+        if hasattr(self, "lb_ztd_connect"):
+            self.lb_ztd_connect.setText("跟随主分析页：" + self.cb_mode.currentText())
+
+    def _show_check_dialog(self) -> None:
+        if self.cb_analysis_mode.currentData() == "current":
+            return
+        self._on_analysis_mode_changed()
+        self.check_dialog.show()
+        self.check_dialog.raise_()
+        self.check_dialog.activateWindow()
+        _apply_dark_titlebar(self.check_dialog)
 
     def _remember_form_paths(self) -> None:
         self._remember_path("zmx", self.ed_zmx.text().strip())
@@ -776,6 +917,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "btn_preview_fields"):
             self.btn_preview_fields.setVisible(not use_current)
             self.btn_preview_fields.setEnabled(not use_current)
+        if hasattr(self, "btn_show_check"):
+            self.btn_show_check.setEnabled(not use_current)
+            self.btn_show_check.setToolTip(
+                "当前设置模式不需要配置检查" if use_current else "打开配置与视场检查")
+        if use_current and hasattr(self, "check_dialog"):
+            self.check_dialog.hide()
+        if hasattr(self, "lb_check_mode"):
+            self.lb_check_mode.setText(self.cb_analysis_mode.currentText())
         self.standard_panel.setVisible(use_standard or use_current)
         self.standard_panel.setEnabled(use_standard or use_current)
         self.cb_product_type.setVisible(use_standard)
@@ -1306,8 +1455,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_ztd.setEnabled(not running)
         self.btn_cancel.setEnabled(running and self._active_task == "tol")
         # 运行态统一禁用这些按钮；非运行态的显隐与 enable 交给 _on_analysis_mode_changed 复原。
-        for btn in (self.btn_export_std, self.btn_check_config,
-                    self.btn_preview_fields, self.btn_open_result):
+        for btn in (self.btn_show_check, self.btn_export_std, self.btn_check_config,
+                    self.btn_preview_fields, self.btn_open_result_log):
             btn.setEnabled(not running)
         for w in (self.ed_zmx, self.ed_config, self.ed_outdir,
                   self.ed_ztd, self.cb_mode, self.cb_analysis_mode,
@@ -1325,6 +1474,12 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             msg = "就绪"
         self.statusBar().showMessage(msg)
+
+    def showEvent(self, event: QtGui.QShowEvent):
+        super().showEvent(event)
+        _apply_dark_titlebar(self)
+        if hasattr(self, "check_dialog"):
+            _apply_dark_titlebar(self.check_dialog)
 
     def _warn(self, msg: str):
         _dark_message_box(
@@ -1365,8 +1520,10 @@ def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
     _apply_dark_palette(app)
     win = MainWindow()
-    win.show()
     _apply_dark_titlebar(win)
+    win.show()
+    for delay in (0, 50, 200, 500):
+        QtCore.QTimer.singleShot(delay, lambda w=win: _apply_dark_titlebar(w))
     return app.exec()
 
 
