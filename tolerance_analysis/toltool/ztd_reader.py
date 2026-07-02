@@ -75,6 +75,10 @@ def _clean_label(value) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def _base_report_label(value) -> str:
+    return re.sub(r"\s+\([0-9]+\)\s*$", "", _clean_label(value))
+
+
 def _try_call(obj, name: str, *args):
     try:
         member = getattr(obj, name)
@@ -284,6 +288,25 @@ def _direction_focus(direction: str) -> str:
     return ""
 
 
+def _nominal_for(label: str, fallback_idx: int, nominals: dict,
+                 parsed: list, meta_row: dict | None = None) -> float:
+    if meta_row and meta_row.get("名义值来源") == "MFE_OPERAND":
+        value = meta_row.get("名义值")
+        if value not in (None, ""):
+            try:
+                value = float(value)
+                if math.isfinite(value):
+                    return value
+            except (TypeError, ValueError):
+                pass
+    for key in (label, _base_report_label(label)):
+        if key in nominals:
+            return nominals[key]
+    if 0 <= fallback_idx < len(parsed):
+        return parsed[fallback_idx][1]
+    return float("nan")
+
+
 def _stats(values, direction: str = ""):
     vals = [v for v in values if v is not None and not math.isnan(v)]
     n = len(vals)
@@ -446,19 +469,20 @@ def read_ztd(zos_system, ztd_path: str, num_runs: int,
             direction = ""
             unit = ""
             meta_idx = c - 1 if c > 0 else -1
+            meta_row = meta[meta_idx] if 0 <= meta_idx < len(meta) else None
             if comp_meta:
                 direction = str(comp_meta.get("方向") or "").strip()
                 unit = str(comp_meta.get("单位") or "").strip()
-            elif 0 <= meta_idx < len(meta):
-                direction = str(meta[meta_idx].get("方向") or "").strip()
-                unit = str(meta[meta_idx].get("单位") or "").strip()
+            elif meta_row:
+                direction = str(meta_row.get("方向") or "").strip()
+                unit = str(meta_row.get("单位") or "").strip()
             stat = _stats(buckets[c], direction=direction)
             (n, mean, std, vmin, vmax, two_s, median, p1, p5, p95, p99,
              lsl, usl) = stat
             items.append(ItemStat(
                 label=label, col=c, n=n, mean=mean, std=std,
                 best=vmin, worst=vmax, two_sigma=two_s,
-                nominal=nominals.get(label, float("nan")),
+                nominal=_nominal_for(label, fallback_idx, nominals, parsed, meta_row),
                 median=median, p1=p1, p5=p5, p95=p95, p99=p99,
                 direction=direction, unit=unit,
                 lsl_cpk133=lsl, usl_cpk133=usl,
@@ -547,6 +571,7 @@ def export_excel(result: ZtdResult, path: str) -> str:
         cell.alignment = Alignment(horizontal="center")
 
     rows = [
+        ("名义值", [it.nominal for it in result.items]),
         ("Cpk1.33下限", [it.lsl_cpk133 for it in result.items]),
         ("Cpk1.33上限", [it.usl_cpk133 for it in result.items]),
         ("最大值", [it.worst for it in result.items]),
@@ -587,8 +612,8 @@ def export_excel(result: ZtdResult, path: str) -> str:
     ws2 = wb.create_sheet("说明")
     lines = [
         ["ZTD文件", result.ztd_path],
-        ["统计结构", "列为 REPORT 指标；前 7 行为统计项；后续 MC001... 为每轮 Monte Carlo 原始数据。"],
-        ["统计项", "Cpk1.33下限、Cpk1.33上限、最大值、最小值、平均值、标准差、中位数"],
+        ["统计结构", "列为 REPORT 指标；前 8 行为统计项；后续 MC001... 为每轮 Monte Carlo 原始数据。"],
+        ["统计项", "名义值、Cpk1.33下限、Cpk1.33上限、最大值、最小值、平均值、标准差、中位数"],
         ["蒙特卡洛次数", result.num_runs],
         ["矩阵列数", result.num_cols],
         ["Cpk目标", _CPK_TARGET],
