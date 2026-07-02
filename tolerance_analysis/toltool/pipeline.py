@@ -6,6 +6,7 @@ GUI 与命令行入口共享这里的核心流程：
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -302,6 +303,130 @@ def _fill_auto_standard_surfaces(zos_system, cfg, rp: dict, log=print) -> None:
         log(f"标准模板自动公差范围: 1-{end_surface}")
 
 
+def _operand_value(zos_system, op: str, *params: float) -> float:
+    import ZOSAPI
+
+    values = list(params[:8])
+    while len(values) < 8:
+        values.append(0)
+    op_enum = getattr(ZOSAPI.Editors.MFE.MeritOperandType, op)
+    return float(zos_system.MFE.GetOperandValue(op_enum, *values))
+
+
+def _next_mfe_line(cfg) -> int:
+    lines: list[int] = []
+    for row in cfg.mfe:
+        try:
+            lines.append(int(float(row.get("行号"))))
+        except (TypeError, ValueError):
+            pass
+    return (max(lines) + 1) if lines else 2
+
+
+def _mfe_row(line_no: int, op: str, *, target=0, weight=0,
+             comment: str = "", field=None, **params) -> dict:
+    row = {
+        "行号": line_no,
+        "操作数": op,
+        "目标": target,
+        "权重": weight,
+        "注释": comment,
+        "目标归一化视场": "" if field is None else field,
+        "视场映射说明": "标准模板动态生成",
+        "归一化视场": "" if field is None else field,
+    }
+    for i in range(1, 9):
+        row[f"Param{i}"] = params.get(f"Param{i}", "")
+    return row
+
+
+def _report_labels(cfg) -> set[str]:
+    return {str(row.get("标签") or "").strip() for row in cfg.report}
+
+
+def _append_standard_dynamic_metrics(zos_system, cfg, rp: dict, center_wave: int,
+                                     log=print):
+    if str(rp.get("分析模式") or "").strip() != "标准模板":
+        return cfg
+    if center_wave <= 0:
+        log("标准模板动态评价项：中心波长号无效，已跳过中心指向偏移和焦距偏移百分比。")
+        return cfg
+
+    new_cfg = copy.deepcopy(cfg)
+    labels = _report_labels(new_cfg)
+    line = _next_mfe_line(new_cfg)
+    added: list[str] = []
+
+    if _yes(rp.get("启用中心指向偏移", "N")) and not {
+        "POINTING_DY_F0_mm", "POINTING_DX_F0_mm"}.issubset(labels):
+        field_no = _as_int(rp.get("中心指向视场号"), 1)
+        if field_no <= 0:
+            field_no = 1
+        ceny0 = _operand_value(zos_system, "CENY", 16, center_wave, field_no, 0, 5)
+        cenx0 = _operand_value(zos_system, "CENX", 16, center_wave, field_no, 0, 5)
+
+        new_cfg.mfe.append(_mfe_row(line, "BLNK", comment="接收指向偏移 F0/mm")); line += 1
+        ceny_line = line
+        new_cfg.mfe.append(_mfe_row(line, "CENY", comment="CENY_F0_current", field=0,
+                                    Param1=16, Param2=center_wave, Param3=field_no,
+                                    Param4=0, Param5=5)); line += 1
+        cenx_line = line
+        new_cfg.mfe.append(_mfe_row(line, "CENX", comment="CENX_F0_current", field=0,
+                                    Param1=16, Param2=center_wave, Param3=field_no,
+                                    Param4=0, Param5=5)); line += 1
+        cons_y_line = line
+        new_cfg.mfe.append(_mfe_row(line, "CONS", target=ceny0, comment="CENY_F0_nominal")); line += 1
+        cons_x_line = line
+        new_cfg.mfe.append(_mfe_row(line, "CONS", target=cenx0, comment="CENX_F0_nominal")); line += 1
+        diff_y_line = line
+        new_cfg.mfe.append(_mfe_row(line, "DIFF", comment="POINTING_DY_F0_mm",
+                                    Param1=ceny_line, Param2=cons_y_line)); line += 1
+        diff_x_line = line
+        new_cfg.mfe.append(_mfe_row(line, "DIFF", comment="POINTING_DX_F0_mm",
+                                    Param1=cenx_line, Param2=cons_x_line)); line += 1
+        new_cfg.report.extend([
+            {"启用": "Y", "标签": "POINTING_DY_F0_mm", "MF行号": diff_y_line, "方向": "小", "单位": "mm"},
+            {"启用": "Y", "标签": "POINTING_DX_F0_mm", "MF行号": diff_x_line, "方向": "小", "单位": "mm"},
+        ])
+        added.extend(["POINTING_DY_F0_mm", "POINTING_DX_F0_mm"])
+        log(f"中心指向偏移 F0：视场号 {field_no}，CENY0={ceny0:.12g}，CENX0={cenx0:.12g}")
+
+    if _yes(rp.get("启用焦距偏移百分比", "N")) and "EFL_DELTA_PCT" not in _report_labels(new_cfg):
+        efl0 = _operand_value(zos_system, "EFFL", center_wave)
+        if abs(efl0) < 1e-15:
+            log("焦距偏移百分比：名义 EFL 接近 0，已跳过 EFL_DELTA_PCT。")
+        else:
+            new_cfg.mfe.append(_mfe_row(line, "BLNK", comment="EFL")); line += 1
+            efl_line = line
+            new_cfg.mfe.append(_mfe_row(line, "EFFL", comment="EFFL_current",
+                                        Param1=center_wave)); line += 1
+            cons_line = line
+            new_cfg.mfe.append(_mfe_row(line, "CONS", target=efl0, comment="EFFL_nominal")); line += 1
+            diff_line = line
+            new_cfg.mfe.append(_mfe_row(line, "DIFF", comment="EFL_delta",
+                                        Param1=efl_line, Param2=cons_line)); line += 1
+            divi_line = line
+            new_cfg.mfe.append(_mfe_row(line, "DIVI", comment="EFL_delta_ratio",
+                                        Param1=diff_line, Param2=cons_line)); line += 1
+            new_cfg.mfe.append(_mfe_row(line, "BLNK", comment="DELTA EFL")); line += 1
+            pct_line = line
+            new_cfg.mfe.append(_mfe_row(line, "PROB", target=100, comment="EFL_DELTA_PCT",
+                                        Param1=divi_line)); line += 1
+            new_cfg.report.append({ 
+                "启用": "Y",
+                "标签": "EFL_DELTA_PCT",
+                "MF行号": pct_line,
+                "方向": "小",
+                "单位": "%",
+            })
+            added.append("EFL_DELTA_PCT")
+            log(f"焦距偏移百分比：EFFL0={efl0:.12g}，已追加 EFL_DELTA_PCT。")
+
+    if added:
+        log("标准模板动态评价项：已追加 " + ", ".join(added))
+    return new_cfg
+
+
 @dataclass
 class Prepared:
     sess: object
@@ -449,6 +574,8 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
             field_mapping_report_path = ""
     else:
         log("视场映射：未启用")
+
+    cfg = _append_standard_dynamic_metrics(sess.sys, cfg, rp, center_wave, log=log)
 
     try:
         if use_current_settings:
