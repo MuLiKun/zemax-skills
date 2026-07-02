@@ -293,7 +293,7 @@ class _Worker(QtCore.QObject):
 
             if _yes(prep.rp.get("输出统计Excel", "N")):
                 from toltool import ztd_reader
-                report_meta = [
+                report_meta = prep.report_meta or [
                     r for r in prep.cfg.report
                     if _yes(r.get("启用")) and r.get("标签")
                 ]
@@ -389,7 +389,10 @@ class _ZtdWorker(QtCore.QObject):
             if os.path.isfile(run_config):
                 try:
                     with open(run_config, "r", encoding="utf-8") as f:
-                        tde_meta = json.load(f).get("tde_meta") or None
+                        saved = json.load(f)
+                    report_meta = saved.get("report_meta") or report_meta
+                    report_labels = [str(r.get("标签")).strip() for r in report_meta]
+                    tde_meta = saved.get("tde_meta") or None
                 except Exception:
                     tde_meta = None
             num_runs = _as_int(cfg.run_params.get("蒙特卡洛次数"), 0)
