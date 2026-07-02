@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         print("[8/10] 标准模板模式 validate-only 正向检查")
         _run([str(py), "-u", "tol_run.py", "--validate-only", "--standard",
               "--zmx", str(dummy_zmx), "--outdir", str(tmp_dir),
-              "--standard-template", "快速摸底", "--tolerance-level", "标准",
+              "--product-type", "RX", "--standard-template", "标准分析", "--tolerance-level", "标准",
               "--num-runs", "5", "--num-to-save", "0"], cwd=script_dir)
 
         print("[9/10] 当前设置模式 validate-only 正向检查")
