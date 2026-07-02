@@ -68,7 +68,7 @@ def _standard_config_path(args) -> str:
     return standard_templates.make_temp_config(
         args.zmx, args.outdir, args.standard_template, args.tolerance_level,
         args.num_runs, args.num_to_save, args.center_wave, args.comp_mode,
-        args.save_worst_best)
+        args.save_worst_best, product_type=args.product_type)
 
 
 def _cmd_validate_only(args) -> int:
@@ -206,8 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="使用普通标准模板模式，不需要 --config")
     p.add_argument("--current-settings", action="store_true",
                    help="使用 Zemax 当前设置模式：复用 zmx 中已有 TDE/MFE，不需要 --config")
+    p.add_argument("--product-type", choices=standard_templates.PRODUCT_TYPES,
+                   default=standard_templates.DEFAULT_PRODUCT_TYPE,
+                   help="产品类型；当前 TX 暂复用 RX 模板")
     p.add_argument("--standard-template", choices=standard_templates.TEMPLATE_NAMES,
-                   default="快速摸底", help="标准模板名称")
+                   default=standard_templates.DEFAULT_TEMPLATE_NAME, help="标准模板名称")
     p.add_argument("--tolerance-level", choices=standard_templates.LEVEL_NAMES,
                    default="标准", help="标准模板公差等级")
     p.add_argument("--num-runs", type=int, default=20,
