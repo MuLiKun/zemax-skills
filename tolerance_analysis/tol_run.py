@@ -148,7 +148,7 @@ def _cmd_run(args) -> int:
         return 0
 
     try:
-        report_meta = [
+        report_meta = prep.report_meta or [
             r for r in prep.cfg.report if _yes(r.get("启用")) and r.get("标签")
         ]
         report_labels = [str(r.get("标签")).strip() for r in report_meta]
