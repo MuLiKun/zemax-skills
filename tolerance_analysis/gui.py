@@ -216,7 +216,8 @@ class _Worker(QtCore.QObject):
                     self._standard_args["num_to_save"],
                     self._standard_args["center_wave"],
                     self._standard_args["comp_mode"],
-                    self._standard_args["save_worst_best"])
+                    self._standard_args["save_worst_best"],
+                    product_type=self._standard_args["product_type"])
                 self.log.emit(f"标准模板配置: {config}")
 
             prep = pipeline.prepare_session(
@@ -532,11 +533,15 @@ class MainWindow(QtWidgets.QMainWindow):
         std = QtWidgets.QHBoxLayout(self.standard_panel)
         std.setContentsMargins(0, 0, 0, 0)
         std.setSpacing(6)
-        self.cb_std_template = QtWidgets.QComboBox()
-        self.cb_std_template.addItems(standard_templates.TEMPLATE_NAMES)
-        idx = self.cb_std_template.findText(self._setting("standard_template", "快速摸底"))
+        self.cb_product_type = QtWidgets.QComboBox()
+        self.cb_product_type.addItems(standard_templates.product_types())
+        idx = self.cb_product_type.findText(self._setting("product_type", standard_templates.DEFAULT_PRODUCT_TYPE))
         if idx >= 0:
-            self.cb_std_template.setCurrentIndex(idx)
+            self.cb_product_type.setCurrentIndex(idx)
+        self.cb_std_template = QtWidgets.QComboBox()
+        self._refresh_standard_templates(self._setting("standard_template", standard_templates.DEFAULT_TEMPLATE_NAME))
+        self.cb_product_type.currentIndexChanged.connect(self._on_product_type_changed)
+        self.cb_std_template.currentIndexChanged.connect(self._update_template_tooltip)
         self.cb_tol_level = QtWidgets.QComboBox()
         self.cb_tol_level.addItems(standard_templates.LEVEL_NAMES)
         idx = self.cb_tol_level.findText(self._setting("tolerance_level", "标准"))
@@ -555,11 +560,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cb_comp.setCurrentIndex(idx)
         self.chk_save_worst_best = QtWidgets.QCheckBox("保存 WC/BC")
         self.chk_save_worst_best.setChecked(_yes(self._setting("standard_save_worst_best", "N")))
+        self.lb_product_type = QtWidgets.QLabel("产品")
         self.lb_std_template = QtWidgets.QLabel("模板")
         self.lb_tol_level = QtWidgets.QLabel("等级")
         self.lb_runs = QtWidgets.QLabel("MC")
         self.lb_save = QtWidgets.QLabel("保存")
         self.lb_comp = QtWidgets.QLabel("补偿")
+        std.addWidget(self.lb_product_type)
+        std.addWidget(self.cb_product_type)
         std.addWidget(self.lb_std_template)
         std.addWidget(self.cb_std_template, 2)
         std.addWidget(self.lb_tol_level)
@@ -676,6 +684,34 @@ class MainWindow(QtWidgets.QMainWindow):
         getattr(btn, "_row_label").setVisible(visible)
         getattr(btn, "_row_edit").setVisible(visible)
 
+    def _refresh_standard_templates(self, preferred: str = "") -> None:
+        product_type = self.cb_product_type.currentText() or standard_templates.DEFAULT_PRODUCT_TYPE
+        names = standard_templates.template_names(product_type)
+        self.cb_std_template.blockSignals(True)
+        self.cb_std_template.clear()
+        self.cb_std_template.addItems(names)
+        idx = self.cb_std_template.findText(preferred or standard_templates.DEFAULT_TEMPLATE_NAME)
+        if idx < 0:
+            idx = 0
+        if idx >= 0:
+            self.cb_std_template.setCurrentIndex(idx)
+        self.cb_std_template.blockSignals(False)
+        self._update_template_tooltip()
+
+    def _update_template_tooltip(self) -> None:
+        product_type = self.cb_product_type.currentText() or standard_templates.DEFAULT_PRODUCT_TYPE
+        template = self.cb_std_template.currentText() or standard_templates.DEFAULT_TEMPLATE_NAME
+        try:
+            tip = standard_templates.template_description(template, product_type)
+        except Exception:
+            tip = ""
+        self.cb_std_template.setToolTip(tip)
+        if hasattr(self, "lb_std_template"):
+            self.lb_std_template.setToolTip(tip)
+
+    def _on_product_type_changed(self) -> None:
+        self._refresh_standard_templates(self.cb_std_template.currentText())
+
     def _setting(self, key: str, default: str = "") -> str:
         return str(self._settings.value(key, default) or "")
 
@@ -712,6 +748,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._remember_path("ztd", self.ed_ztd.text().strip())
         self._settings.setValue("connect", self.cb_mode.currentData())
         self._settings.setValue("analysis_mode", self.cb_analysis_mode.currentData())
+        self._settings.setValue("product_type", self.cb_product_type.currentText())
         self._settings.setValue("standard_template", self.cb_std_template.currentText())
         self._settings.setValue("tolerance_level", self.cb_tol_level.currentText())
         self._settings.setValue("standard_runs", self.sp_runs.value())
@@ -741,10 +778,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.btn_preview_fields.setEnabled(not use_current)
         self.standard_panel.setVisible(use_standard or use_current)
         self.standard_panel.setEnabled(use_standard or use_current)
+        self.cb_product_type.setVisible(use_standard)
+        self.lb_product_type.setVisible(use_standard)
         self.cb_std_template.setVisible(use_standard)
         self.lb_std_template.setVisible(use_standard)
         self.cb_tol_level.setVisible(use_standard)
         self.lb_tol_level.setVisible(use_standard)
+        self.cb_product_type.setEnabled(use_standard)
         self.cb_std_template.setEnabled(use_standard)
         self.cb_tol_level.setEnabled(use_standard)
         if hasattr(self, "lb_standard_panel"):
@@ -789,6 +829,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _standard_args_from_ui(self) -> dict:
         return {
+            "product_type": self.cb_product_type.currentText(),
             "template": self.cb_std_template.currentText(),
             "level": self.cb_tol_level.currentText(),
             "num_runs": self.sp_runs.value(),
@@ -824,7 +865,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 num_to_save=self.sp_save.value(),
                 center_wave=0,
                 comp_mode=self.cb_comp.currentText(),
-                save_worst_best=self.chk_save_worst_best.isChecked())
+                save_worst_best=self.chk_save_worst_best.isChecked(),
+                product_type=self.cb_product_type.currentText())
             return pipeline.validate_config_data(cfg)
         return pipeline.validate_config(zmx, config)
 
@@ -928,7 +970,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 zmx, template=args["template"], level=args["level"],
                 num_runs=args["num_runs"], num_to_save=args["num_to_save"],
                 center_wave=args["center_wave"], comp_mode=args["comp_mode"],
-                save_worst_best=args["save_worst_best"])
+                save_worst_best=args["save_worst_best"],
+                product_type=args["product_type"])
             standard_templates.write_config_excel(path, cfg, overwrite=True)
         except Exception as e:
             self._warn("导出标准配置失败：\n" + str(e))
@@ -973,7 +1016,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if use_standard:
             self._append_log("分析模式: 普通标准模板")
             self._append_log(
-                f"模板={standard_args['template']} 等级={standard_args['level']} "
+                f"产品={standard_args['product_type']} 模板={standard_args['template']} 等级={standard_args['level']} "
                 f"MC={standard_args['num_runs']} 保存={standard_args['num_to_save']} "
                 f"补偿={standard_args['comp_mode']} "
                 f"保存WC/BC={'Y' if standard_args['save_worst_best'] else 'N'}")
