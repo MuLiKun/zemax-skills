@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -50,6 +51,127 @@ def _enum_name(value) -> str:
     text = text.upper()
     match = re.search(r"[A-Z]{3,4}", text)
     return match.group(0) if match else text
+
+
+def _mfe_row_map(mfe_rows: list[dict]) -> dict[int, dict]:
+    out: dict[int, dict] = {}
+    for row in mfe_rows:
+        try:
+            line_no = int(float(row.get("行号")))
+        except (TypeError, ValueError):
+            continue
+        out[line_no] = row
+    return out
+
+
+def _row_param(row: dict, name: str, default: float = 0) -> float:
+    value = row.get(name)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _calc_mfe_row_nominal(zos_system, rows: dict[int, dict], line_no: int,
+                          cache: dict[int, float]) -> float:
+    if line_no in cache:
+        return cache[line_no]
+    row = rows.get(line_no)
+    if not row:
+        return float("nan")
+    op = str(row.get("操作数") or "").strip().upper()
+    try:
+        if op == "CONS":
+            value = float(row.get("目标") or 0)
+        elif op == "DIFF":
+            value = (_calc_mfe_row_nominal(zos_system, rows, int(_row_param(row, "Param1")), cache)
+                     - _calc_mfe_row_nominal(zos_system, rows, int(_row_param(row, "Param2")), cache))
+        elif op == "DIVI":
+            denominator = _calc_mfe_row_nominal(zos_system, rows, int(_row_param(row, "Param2")), cache)
+            value = (_calc_mfe_row_nominal(zos_system, rows, int(_row_param(row, "Param1")), cache)
+                     / denominator) if denominator else float("nan")
+        elif op == "PROB":
+            value = _calc_mfe_row_nominal(zos_system, rows, int(_row_param(row, "Param1")), cache)
+            factor = _row_param(row, "Param3", 1)
+            value *= factor
+        elif op == "BLNK":
+            value = 0.0
+        else:
+            value = _operand_value(
+                zos_system, op,
+                _row_param(row, "Param1"), _row_param(row, "Param2"),
+                _row_param(row, "Param3"), _row_param(row, "Param4"),
+                _row_param(row, "Param5"), _row_param(row, "Param6"),
+                _row_param(row, "Param7"), _row_param(row, "Param8"))
+    except Exception:
+        value = float("nan")
+    cache[line_no] = value
+    return value
+
+
+def _mfe_editor_value(zos_system, line_no: int) -> float:
+    """读取 MFE 编辑器指定行「Value」列的当前计算值（评价函数名义值）。"""
+    import ZOSAPI
+
+    mfe = zos_system.MFE
+    row = mfe.GetOperandAt(line_no)
+    merit_column = ZOSAPI.Editors.MFE.MeritColumn
+    # 优先读 Value 列；不同版本列名可能是 Value/CurrentValue
+    for name in ("Value", "CurrentValue"):
+        col = getattr(merit_column, name, None)
+        if col is None:
+            continue
+        try:
+            return float(row.GetOperandCell(col).Value)
+        except Exception:
+            continue
+    # 退化：行对象的 Value 属性
+    return float(getattr(row, "Value"))
+
+
+def _read_report_nominals(zos_system, mfe_rows: list[dict], report_rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    rows = _mfe_row_map(mfe_rows)
+    cache: dict[int, float] = {}
+    # 读取前先触发一次评价函数计算，确保 Value 列已刷新。
+    for method in ("CalculateMeritFunction", "CalculateMeritFunctionAndUpdateOperands"):
+        fn = getattr(zos_system.MFE, method, None)
+        if callable(fn):
+            try:
+                fn()
+                break
+            except Exception:
+                continue
+    for row in report_rows:
+        if not _yes(row.get("启用")) or not row.get("标签"):
+            continue
+        new_row = dict(row)
+        value = float("nan")
+        try:
+            line_no = int(float(row.get("MF行号")))
+        except (TypeError, ValueError):
+            line_no = None
+        if line_no is not None:
+            # 首选：直接读 MFE 编辑器该行的计算值（真正的评价函数值）。
+            try:
+                value = _mfe_editor_value(zos_system, line_no)
+            except Exception:
+                value = float("nan")
+            # 兜底：按操作数自行递归计算（编辑器读值失败时）。
+            if not math.isfinite(value):
+                try:
+                    value = _calc_mfe_row_nominal(zos_system, rows, line_no, cache)
+                except Exception:
+                    value = float("nan")
+        if math.isfinite(value):
+            new_row["名义值"] = value
+            new_row["名义值来源"] = "MFE_OPERAND"
+        else:
+            new_row["名义值"] = ""
+        out.append(new_row)
+    return out
 
 
 def _read_tde_meta(zos_system) -> list[dict]:
@@ -410,9 +532,9 @@ def _append_standard_dynamic_metrics(zos_system, cfg, rp: dict, center_wave: int
                                         Param1=diff_line, Param2=cons_line)); line += 1
             new_cfg.mfe.append(_mfe_row(line, "BLNK", comment="DELTA EFL")); line += 1
             pct_line = line
-            new_cfg.mfe.append(_mfe_row(line, "PROB", target=100, comment="EFL_DELTA_PCT",
-                                        Param1=divi_line)); line += 1
-            new_cfg.report.append({ 
+            new_cfg.mfe.append(_mfe_row(line, "PROB", comment="EFL_DELTA_PCT",
+                                        Param1=divi_line, Param3=100)); line += 1
+            new_cfg.report.append({
                 "启用": "Y",
                 "标签": "EFL_DELTA_PCT",
                 "MF行号": pct_line,
@@ -446,6 +568,7 @@ class Prepared:
     log_path: str = ""
     run_config_path: str = ""
     field_mapping_report_path: str = ""
+    report_meta: list | None = None
     tde_meta: list | None = None
 
 
@@ -620,6 +743,19 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
         n_mfe, mf_path = mfe_builder.build_and_save(sess.sys, cfg.mfe, base)
         log(f"已重建 MFE: {n_mfe} 行  → {mf_path}")
 
+    report_meta = _read_report_nominals(sess.sys, cfg.mfe, cfg.report)
+    nominal_count = sum(1 for row in report_meta if row.get("名义值") not in (None, ""))
+    if nominal_count:
+        preview = ", ".join(
+            f"{row.get('标签')}={row.get('名义值')}"
+            for row in report_meta[:5]
+            if row.get("名义值") not in (None, ""))
+        suffix = f" 示例：{preview}" if preview else ""
+        log(f"已读取 REPORT 名义值：{nominal_count}/{len(report_meta)} 项。{suffix}")
+    else:
+        log(f"警告：REPORT 名义值全部为空（0/{len(report_meta)}），"
+            f"评价函数 Value 列可能未计算，Excel 名义值行将留空。")
+
     comp_mf_name = None
     if comp_on:
         wave_for_mf = center_wave if center_wave > 0 else (lens_info.primary_wave or 2)
@@ -658,6 +794,7 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
             "mfe": n_mfe,
             "report": n_report,
         },
+        "report_meta": report_meta,
         "tde_meta": tde_meta,
         "run_params": rp,
         "field_mapping": field_mapping_result.to_dict(),
@@ -673,7 +810,7 @@ def prepare_session(zmx: str, config: str, outdir: str | None = None,
                     config_path=os.path.abspath(config) if config else "",
                     log_path=log_path, run_config_path=run_config_path,
                     field_mapping_report_path=field_mapping_report_path,
-                    tde_meta=tde_meta)
+                    report_meta=report_meta, tde_meta=tde_meta)
 
 
 def make_runspec(prep: Prepared) -> tol_runner.RunSpec:
