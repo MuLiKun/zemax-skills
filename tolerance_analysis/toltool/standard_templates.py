@@ -129,6 +129,10 @@ def _mtf(label: str, op: str, field_no: int, freq: float,
 STANDARD_TARGET_FIELDS = (0, 0.5, 0.9, -0.9)
 FULL_TARGET_FIELDS = (0, -0.25, 0.25, -0.5, 0.5, -0.7, 0.7, -0.9, 0.9, -1, 1)
 PRODUCT_TYPES = ("RX", "TX")
+PRODUCT_DESCRIPTIONS = {
+    "RX": "RX：接收端标准模板。",
+    "TX": "TX：发射端标准模板，当前暂复用 RX，后续可单独维护。",
+}
 DEFAULT_PRODUCT_TYPE = "RX"
 DEFAULT_TEMPLATE_NAME = "标准分析"
 
@@ -193,6 +197,11 @@ LEVEL_NAMES = tuple(_LEVEL_VALUES.keys())
 
 def product_types() -> tuple[str, ...]:
     return PRODUCT_TYPES
+
+
+def product_description(product_type: str = DEFAULT_PRODUCT_TYPE) -> str:
+    product_type = _normalize_product_type(product_type)
+    return PRODUCT_DESCRIPTIONS[product_type]
 
 
 def template_names(product_type: str = DEFAULT_PRODUCT_TYPE) -> tuple[str, ...]:
